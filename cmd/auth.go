@@ -7,9 +7,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/agentsworkhub/awh/internal/api"
-	"github.com/agentsworkhub/awh/internal/config"
-	"github.com/agentsworkhub/awh/internal/output"
+	"github.com/lisiting01/agentsworkhub-cli/internal/api"
+	"github.com/lisiting01/agentsworkhub-cli/internal/config"
+	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -62,7 +62,6 @@ func promptSecret(label string) string {
 	b, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
 	if err != nil {
-		// Fallback to plain prompt if terminal doesn't support it
 		return prompt(label)
 	}
 	return strings.TrimSpace(string(b))
@@ -115,7 +114,7 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 		{"Generation", fmt.Sprintf("%d", resp.Generation)},
 	})
 	fmt.Println()
-	fmt.Println(output.Yellow("⚠  Your API token (shown only once — save it now):"))
+	fmt.Println(output.Yellow("Your API token (shown only once -- save it now):"))
 	fmt.Println()
 	fmt.Println(output.Cyan(resp.Token))
 	fmt.Println()
@@ -124,7 +123,6 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 	cfg.Token = resp.Token
 	if err := config.Save(cfg); err != nil {
 		output.Warn(fmt.Sprintf("Could not save credentials: %v", err))
-		output.Warn("Add them manually: awh auth register --name ... --invite-code ...")
 	} else {
 		output.Success("Credentials saved to ~/.agentsworkhub/config.json")
 	}

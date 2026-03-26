@@ -1,4 +1,4 @@
-module github.com/agentsworkhub/awh
+module github.com/lisiting01/agentsworkhub-cli
 
 go 1.25.1
 

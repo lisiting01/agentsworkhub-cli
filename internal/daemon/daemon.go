@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agentsworkhub/awh/internal/api"
-	"github.com/agentsworkhub/awh/internal/config"
+	"github.com/lisiting01/agentsworkhub-cli/internal/api"
+	"github.com/lisiting01/agentsworkhub-cli/internal/config"
 )
 
 // Daemon is the main long-running agent loop.
@@ -52,9 +52,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Check if there's a leftover task from a previous run
 	if prev, _ := d.state.ReadTask(); prev != nil {
-		d.logf("Found leftover task %s (phase: %s) — attempting to recover", prev.JobID, prev.Phase)
+		d.logf("Found leftover task %s (phase: %s) -- attempting to recover", prev.JobID, prev.Phase)
 		if err := d.recoverTask(ctx, prev); err != nil {
-			d.logf("[WARN] Recovery failed: %v — will look for new tasks", err)
+			d.logf("[WARN] Recovery failed: %v -- will look for new tasks", err)
 			_ = d.state.ClearTask()
 		}
 	}
@@ -79,7 +79,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) poll(ctx context.Context) error {
 	// Don't look for new tasks if we're already handling one
 	if task, _ := d.state.ReadTask(); task != nil {
-		d.logf("Still working on task %s (phase: %s) — skipping poll", task.JobID, task.Phase)
+		d.logf("Still working on task %s (phase: %s) -- skipping poll", task.JobID, task.Phase)
 		return nil
 	}
 
@@ -101,7 +101,7 @@ func (d *Daemon) poll(ctx context.Context) error {
 	}
 
 	if !d.cfg.Daemon.AutoAccept {
-		d.logf("Found task %s (%s) — auto_accept is off, skipping", job.ID, job.Title)
+		d.logf("Found task %s (%s) -- auto_accept is off, skipping", job.ID, job.Title)
 		return nil
 	}
 
@@ -173,7 +173,7 @@ func (d *Daemon) recoverTask(ctx context.Context, ts *TaskStatus) error {
 		}
 		return d.runTask(ctx, job, revNote)
 	case "submitted":
-		d.logf("Task %s already submitted — waiting for feedback", job.ID)
+		d.logf("Task %s already submitted -- waiting for feedback", job.ID)
 		return d.waitForFeedback(ctx, job)
 	default:
 		return fmt.Errorf("task in terminal state: %s", job.Status)
@@ -242,7 +242,7 @@ func (d *Daemon) waitForFeedback(ctx context.Context, job *api.Job) error {
 			}
 			switch updated.Status {
 			case "completed":
-				d.logf("Task %s completed — tokens released!", job.ID)
+				d.logf("Task %s completed -- tokens released!", job.ID)
 				_ = d.state.ClearTask()
 				return nil
 
@@ -252,7 +252,7 @@ func (d *Daemon) waitForFeedback(ctx context.Context, job *api.Job) error {
 				return nil
 
 			case "revision":
-				d.logf("Revision requested for task %s — re-running AI...", job.ID)
+				d.logf("Revision requested for task %s -- re-running AI...", job.ID)
 				msgResp, err := d.client.GetMessages(job.ID, 1, 100)
 				if err != nil {
 					return fmt.Errorf("get messages for revision: %w", err)

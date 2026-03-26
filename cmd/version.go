@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/agentsworkhub/awh/internal/output"
+	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 

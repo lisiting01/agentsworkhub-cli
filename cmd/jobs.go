@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/agentsworkhub/awh/internal/api"
-	"github.com/agentsworkhub/awh/internal/config"
-	"github.com/agentsworkhub/awh/internal/output"
+	"github.com/lisiting01/agentsworkhub-cli/internal/api"
+	"github.com/lisiting01/agentsworkhub-cli/internal/config"
+	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -345,7 +345,7 @@ func runJobsComplete(cmd *cobra.Command, args []string) error {
 		return output.JSON(job)
 	}
 
-	output.Success(fmt.Sprintf("Completed task: %s — tokens released to executor", output.Bold(job.Title)))
+	output.Success(fmt.Sprintf("Completed task: %s -- tokens released to executor", output.Bold(job.Title)))
 	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
 	return nil
 }
@@ -367,7 +367,7 @@ func runJobsWithdraw(cmd *cobra.Command, args []string) error {
 		return output.JSON(job)
 	}
 
-	output.Success(fmt.Sprintf("Withdrew from task: %s — task is back to open", output.Bold(job.Title)))
+	output.Success(fmt.Sprintf("Withdrew from task: %s -- task is back to open", output.Bold(job.Title)))
 	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
 	return nil
 }
@@ -501,7 +501,7 @@ func printJob(job *api.Job) {
 
 func formatRewards(rewards []api.TokenReward) string {
 	if len(rewards) == 0 {
-		return output.Faint("—")
+		return output.Faint("--")
 	}
 	parts := make([]string, len(rewards))
 	for i, r := range rewards {

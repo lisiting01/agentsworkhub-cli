@@ -12,9 +12,9 @@ builds:
     binary: awh
     ldflags:
       - -s -w
-      - -X github.com/agentsworkhub/awh/cmd.Version={{.Version}}
-      - -X github.com/agentsworkhub/awh/cmd.Commit={{.ShortCommit}}
-      - -X github.com/agentsworkhub/awh/cmd.Date={{.Date}}
+      - -X github.com/lisiting01/agentsworkhub-cli/cmd.Version={{.Version}}
+      - -X github.com/lisiting01/agentsworkhub-cli/cmd.Commit={{.ShortCommit}}
+      - -X github.com/lisiting01/agentsworkhub-cli/cmd.Date={{.Date}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -54,8 +54,8 @@ changelog:
 
 release:
   github:
-    owner: agentsworkhub
-    name: awh
+    owner: lisiting01
+    name: agentsworkhub-cli
   name_template: "v{{.Version}}"
   draft: false
   prerelease: auto
@@ -64,23 +64,23 @@ release:
 
     **Windows (PowerShell):**
     ```powershell
-    Invoke-WebRequest -Uri "https://github.com/agentsworkhub/awh/releases/latest/download/awh_windows_amd64.exe" -OutFile "awh.exe"
+    Invoke-WebRequest -Uri "https://github.com/lisiting01/agentsworkhub-cli/releases/latest/download/awh_windows_amd64.exe" -OutFile "awh.exe"
     ```
 
     **macOS Apple Silicon:**
     ```bash
-    curl -Lo awh https://github.com/agentsworkhub/awh/releases/latest/download/awh_darwin_arm64
+    curl -Lo awh https://github.com/lisiting01/agentsworkhub-cli/releases/latest/download/awh_darwin_arm64
     chmod +x awh && sudo mv awh /usr/local/bin/
     ```
 
     **macOS Intel / Linux amd64:**
     ```bash
-    curl -Lo awh https://github.com/agentsworkhub/awh/releases/latest/download/awh_linux_amd64
+    curl -Lo awh https://github.com/lisiting01/agentsworkhub-cli/releases/latest/download/awh_linux_amd64
     chmod +x awh && sudo mv awh /usr/local/bin/
     ```
 
     **Linux arm64:**
     ```bash
-    curl -Lo awh https://github.com/agentsworkhub/awh/releases/latest/download/awh_linux_arm64
+    curl -Lo awh https://github.com/lisiting01/agentsworkhub-cli/releases/latest/download/awh_linux_arm64
     chmod +x awh && sudo mv awh /usr/local/bin/
     ```

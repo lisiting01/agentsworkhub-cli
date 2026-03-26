@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/agentsworkhub/awh/internal/config"
-	"github.com/agentsworkhub/awh/internal/daemon"
-	"github.com/agentsworkhub/awh/internal/output"
+	"github.com/lisiting01/agentsworkhub-cli/internal/config"
+	"github.com/lisiting01/agentsworkhub-cli/internal/daemon"
+	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +19,7 @@ var daemonCmd = &cobra.Command{
 	Short: "Manage the background agent daemon",
 	Long: `The daemon watches AgentsWorkhub for open tasks, automatically accepts
 matching ones, runs your local AI engine (Claude Code, Codex, etc.) headlessly
-to complete the work, and submits results — all without touching your main AI session.`,
+to complete the work, and submits results -- all without touching your main AI session.`,
 }
 
 var daemonStartCmd = &cobra.Command{
@@ -105,7 +105,6 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Apply flag overrides to config
 	if v, _ := cmd.Flags().GetString("engine"); v != "" {
 		cfg.Daemon.Engine = v
 	}
@@ -123,18 +122,16 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		cfg.Daemon.SkillsFilter = v
 	}
 
-	// Check if already running
 	running, pid, _ := st.IsRunning()
 	if running {
 		output.Warn(fmt.Sprintf("Daemon already running (PID %d). Stop it first with: awh daemon stop", pid))
 		return nil
 	}
 
-	// Open log file (writes go to both log file and stdout)
 	logFile, err := st.OpenLog()
 	var logWriter io.Writer
 	if err != nil {
-		output.Warn(fmt.Sprintf("Could not open log file: %v — logging to stdout only", err))
+		output.Warn(fmt.Sprintf("Could not open log file: %v -- logging to stdout only", err))
 		logWriter = os.Stdout
 	} else {
 		defer logFile.Close()
@@ -142,13 +139,13 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Starting daemon (PID %d)\n", output.Cyan("[awh]"), os.Getpid())
-	fmt.Printf("  Engine:   %s (%s)\n", output.Bold(cfg.Daemon.Engine), cfg.Daemon.EnginePath)
-	fmt.Printf("  Poll:     every %ds\n", cfg.Daemon.PollIntervalSecs)
+	fmt.Printf("  Engine:     %s (%s)\n", output.Bold(cfg.Daemon.Engine), cfg.Daemon.EnginePath)
+	fmt.Printf("  Poll:       every %ds\n", cfg.Daemon.PollIntervalSecs)
 	fmt.Printf("  AutoAccept: %v\n", cfg.Daemon.AutoAccept)
 	if len(cfg.Daemon.SkillsFilter) > 0 {
 		fmt.Printf("  Skills filter: %v\n", cfg.Daemon.SkillsFilter)
 	}
-	fmt.Printf("  Logs:     %s\n\n", st.LogPath())
+	fmt.Printf("  Logs:       %s\n\n", st.LogPath())
 	fmt.Printf("Press Ctrl+C to stop.\n\n")
 
 	d := daemon.New(cfg, st, logWriter)

@@ -1,6 +1,6 @@
 package main
 
-import "github.com/agentsworkhub/awh/cmd"
+import "github.com/lisiting01/agentsworkhub-cli/cmd"
 
 func main() {
 	cmd.Execute()

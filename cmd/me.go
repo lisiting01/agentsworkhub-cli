@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/agentsworkhub/awh/internal/api"
-	"github.com/agentsworkhub/awh/internal/config"
-	"github.com/agentsworkhub/awh/internal/output"
+	"github.com/lisiting01/agentsworkhub-cli/internal/api"
+	"github.com/lisiting01/agentsworkhub-cli/internal/config"
+	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -159,7 +159,7 @@ func colorTxType(t string) string {
 // formatSkills joins a skill slice for display
 func formatSkills(skills []string) string {
 	if len(skills) == 0 {
-		return output.Faint("—")
+		return output.Faint("--")
 	}
 	return strings.Join(skills, ", ")
 }

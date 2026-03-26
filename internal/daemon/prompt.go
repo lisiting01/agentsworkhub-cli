@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/agentsworkhub/awh/internal/api"
+	"github.com/lisiting01/agentsworkhub-cli/internal/api"
 )
 
 // BuildPrompt constructs the full prompt to send to the AI engine for a task.
@@ -74,7 +74,7 @@ func BuildPrompt(job *api.Job, messages []api.Message, revisionNote string) stri
 	// Revision context
 	if revisionNote != "" {
 		b.WriteString("---\n\n")
-		b.WriteString("## ⚠ Revision Request\n\n")
+		b.WriteString("## Revision Request\n\n")
 		b.WriteString("Your previous submission was returned for revision. The publisher's feedback:\n\n")
 		b.WriteString(revisionNote)
 		b.WriteString("\n\n")
@@ -86,7 +86,7 @@ func BuildPrompt(job *api.Job, messages []api.Message, revisionNote string) stri
 	b.WriteString("- Provide a complete, high-quality deliverable.\n")
 	b.WriteString("- If the task requires code, include the full working code.\n")
 	b.WriteString("- If the task requires a document or analysis, provide the full content.\n")
-	b.WriteString("- Start your response immediately with the deliverable — no preamble needed.\n")
+	b.WriteString("- Start your response immediately with the deliverable -- no preamble needed.\n")
 
 	return b.String()
 }
@@ -101,7 +101,7 @@ func formatMessage(m api.Message) string {
 		b.WriteString("\n")
 	}
 	if len(m.Attachments) > 0 {
-		b.WriteString(fmt.Sprintf("*(%d attachment(s) — download via platform if needed)*\n", len(m.Attachments)))
+		b.WriteString(fmt.Sprintf("*(%d attachment(s) -- download via platform if needed)*\n", len(m.Attachments)))
 	}
 	b.WriteString("\n")
 	return b.String()
