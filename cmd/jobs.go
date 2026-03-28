@@ -90,6 +90,57 @@ var jobsMsgCmd = &cobra.Command{
 	RunE:  runJobsMsg,
 }
 
+// --- Recurring ---
+
+var jobsCyclesCmd = &cobra.Command{
+	Use:   "cycles <jobId>",
+	Short: "List all cycles for a recurring task",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsCycles,
+}
+
+var jobsCycleSubmitCmd = &cobra.Command{
+	Use:   "cycle-submit <jobId>",
+	Short: "Submit current cycle deliverable (executor, recurring only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsCycleSubmit,
+}
+
+var jobsCycleCompleteCmd = &cobra.Command{
+	Use:   "cycle-complete <jobId>",
+	Short: "Complete current cycle and release tokens (publisher, recurring only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsCycleComplete,
+}
+
+var jobsCycleReviseCmd = &cobra.Command{
+	Use:   "cycle-revise <jobId>",
+	Short: "Request revision for current cycle (publisher, recurring only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsCycleRevise,
+}
+
+var jobsTopUpCmd = &cobra.Command{
+	Use:   "topup <jobId>",
+	Short: "Top up the token pool for a recurring task (publisher only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsTopUp,
+}
+
+var jobsPauseCmd = &cobra.Command{
+	Use:   "pause <jobId>",
+	Short: "Pause an active recurring task (publisher only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsPause,
+}
+
+var jobsResumeCmd = &cobra.Command{
+	Use:   "resume <jobId>",
+	Short: "Resume a paused recurring task (publisher only)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsResume,
+}
+
 func init() {
 	rootCmd.AddCommand(jobsCmd)
 	jobsCmd.AddCommand(jobsListCmd)
@@ -103,14 +154,23 @@ func init() {
 	jobsCmd.AddCommand(jobsReviseCmd)
 	jobsCmd.AddCommand(jobsMessagesCmd)
 	jobsCmd.AddCommand(jobsMsgCmd)
+	jobsCmd.AddCommand(jobsCyclesCmd)
+	jobsCmd.AddCommand(jobsCycleSubmitCmd)
+	jobsCmd.AddCommand(jobsCycleCompleteCmd)
+	jobsCmd.AddCommand(jobsCycleReviseCmd)
+	jobsCmd.AddCommand(jobsTopUpCmd)
+	jobsCmd.AddCommand(jobsPauseCmd)
+	jobsCmd.AddCommand(jobsResumeCmd)
 
-	jobsListCmd.Flags().String("status", "open", "Filter by status (open/all/in_progress/completed/cancelled)")
+	jobsListCmd.Flags().String("status", "open", "Filter by status (open/all/in_progress/active/paused/completed/cancelled)")
+	jobsListCmd.Flags().String("mode", "", "Filter by mode: oneoff or recurring")
 	jobsListCmd.Flags().StringP("query", "q", "", "Search keyword")
 	jobsListCmd.Flags().Int("page", 1, "Page number")
 	jobsListCmd.Flags().Int("limit", 20, "Results per page")
 
 	jobsMineCmd.Flags().String("role", "", "Filter by role: publisher or executor")
 	jobsMineCmd.Flags().String("status", "", "Filter by status")
+	jobsMineCmd.Flags().String("mode", "", "Filter by mode: oneoff or recurring")
 	jobsMineCmd.Flags().Int("page", 1, "Page number")
 	jobsMineCmd.Flags().Int("limit", 20, "Results per page")
 
@@ -125,6 +185,19 @@ func init() {
 
 	jobsMsgCmd.Flags().StringP("type", "t", "message", "Message type: brief, standards, message")
 	jobsMsgCmd.Flags().StringP("content", "c", "", "Message content")
+
+	jobsCyclesCmd.Flags().Int("page", 1, "Page number")
+	jobsCyclesCmd.Flags().Int("limit", 20, "Results per page")
+
+	jobsCycleSubmitCmd.Flags().StringP("content", "c", "", "Deliverable content")
+	jobsCycleSubmitCmd.Flags().StringSlice("attachment", nil, "File ID(s) to attach")
+
+	jobsCycleReviseCmd.Flags().StringP("content", "c", "", "Revision feedback (required)")
+	_ = jobsCycleReviseCmd.MarkFlagRequired("content")
+
+	jobsTopUpCmd.Flags().String("model", "claude-sonnet-4-6", "Model ID to top up")
+	jobsTopUpCmd.Flags().Int64("amount", 0, "Token amount to add to pool (required)")
+	_ = jobsTopUpCmd.MarkFlagRequired("amount")
 }
 
 func runJobsList(cmd *cobra.Command, args []string) error {
@@ -137,12 +210,13 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 	}
 
 	status, _ := cmd.Flags().GetString("status")
+	mode, _ := cmd.Flags().GetString("mode")
 	q, _ := cmd.Flags().GetString("query")
 	page, _ := cmd.Flags().GetInt("page")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	result, err := client.ListJobs(status, q, page, limit)
+	result, err := client.ListJobs(status, mode, q, page, limit)
 	if err != nil {
 		output.Error(err.Error())
 		return nil
@@ -166,13 +240,14 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 		rows[i] = []string{
 			output.Truncate(j.ID, 10),
 			output.StatusColor(j.Status),
-			output.Truncate(j.Title, 50),
+			formatMode(j.Mode),
+			output.Truncate(j.Title, 45),
 			j.PublisherName,
 			formatRewards(j.TokenRewards),
 			formatSkills(j.Skills),
 		}
 	}
-	output.Table([]string{"ID", "Status", "Title", "Publisher", "Reward", "Skills"}, rows)
+	output.Table([]string{"ID", "Status", "Mode", "Title", "Publisher", "Reward/Cycle", "Skills"}, rows)
 	fmt.Println()
 	return nil
 }
@@ -209,11 +284,12 @@ func runJobsMine(cmd *cobra.Command, args []string) error {
 
 	role, _ := cmd.Flags().GetString("role")
 	status, _ := cmd.Flags().GetString("status")
+	mode, _ := cmd.Flags().GetString("mode")
 	page, _ := cmd.Flags().GetInt("page")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	result, err := client.MyJobs(role, status, page, limit)
+	result, err := client.MyJobs(role, status, mode, page, limit)
 	if err != nil {
 		output.Error(err.Error())
 		return nil
@@ -478,18 +554,39 @@ func printJob(job *api.Job) {
 		{"ID", job.ID},
 		{"Title", output.Bold(job.Title)},
 		{"Status", output.StatusColor(job.Status)},
+		{"Mode", formatMode(job.Mode)},
 		{"Publisher", job.PublisherName},
 	})
 	if job.ExecutorName != "" {
-		fmt.Printf("  %-16s%s\n", output.Bold("Executor:"), job.ExecutorName)
+		fmt.Printf("  %-20s%s\n", output.Bold("Executor:"), job.ExecutorName)
 	}
 	if job.Duration != "" {
-		fmt.Printf("  %-16s%s\n", output.Bold("Duration:"), job.Duration)
+		fmt.Printf("  %-20s%s\n", output.Bold("Duration:"), job.Duration)
 	}
 	if len(job.Skills) > 0 {
-		fmt.Printf("  %-16s%s\n", output.Bold("Skills:"), strings.Join(job.Skills, ", "))
+		fmt.Printf("  %-20s%s\n", output.Bold("Skills:"), strings.Join(job.Skills, ", "))
 	}
-	fmt.Printf("  %-16s%s\n", output.Bold("Reward:"), formatRewards(job.TokenRewards))
+	rewardLabel := "Reward:"
+	if job.Mode == "recurring" {
+		rewardLabel = "Reward/Cycle:"
+	}
+	fmt.Printf("  %-20s%s\n", output.Bold(rewardLabel), formatRewards(job.TokenRewards))
+
+	if job.Mode == "recurring" {
+		if job.CycleConfig != nil {
+			desc := ""
+			if job.CycleConfig.Description != "" {
+				desc = " — " + job.CycleConfig.Description
+			}
+			fmt.Printf("  %-20s%d days%s\n", output.Bold("Cycle Interval:"), job.CycleConfig.IntervalDays, desc)
+		}
+		if job.CurrentCycleNumber > 0 {
+			fmt.Printf("  %-20s%d\n", output.Bold("Current Cycle:"), job.CurrentCycleNumber)
+		}
+		if len(job.PoolBalance) > 0 {
+			fmt.Printf("  %-20s%s\n", output.Bold("Pool Balance:"), formatPoolBalance(job.PoolBalance))
+		}
+	}
 
 	if job.Description != "" {
 		fmt.Println()
@@ -508,4 +605,231 @@ func formatRewards(rewards []api.TokenReward) string {
 		parts[i] = fmt.Sprintf("%s %s", output.FormatTokens(r.Amount), output.Faint(r.ModelID))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func formatPoolBalance(balances []api.PoolBalance) string {
+	if len(balances) == 0 {
+		return output.Faint("--")
+	}
+	parts := make([]string, len(balances))
+	for i, b := range balances {
+		parts[i] = fmt.Sprintf("%s %s", output.FormatTokens(b.Balance), output.Faint(b.ModelID))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatMode(mode string) string {
+	switch mode {
+	case "recurring":
+		return output.Cyan("recurring")
+	case "oneoff", "":
+		return output.Faint("one-off")
+	default:
+		return mode
+	}
+}
+
+// --- Recurring command handlers ---
+
+func runJobsCycles(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if baseURLOverride != "" {
+		cfg.BaseURL = baseURLOverride
+	}
+
+	page, _ := cmd.Flags().GetInt("page")
+	limit, _ := cmd.Flags().GetInt("limit")
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	result, err := client.ListCycles(args[0], page, limit)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(result)
+	}
+
+	fmt.Printf("\nCycles for job %s (page %d/%d, total %d)\n\n",
+		output.Cyan(args[0]), result.Page, result.TotalPages, result.Total)
+
+	if len(result.Cycles) == 0 {
+		fmt.Println("  No cycles found.")
+		fmt.Println()
+		return nil
+	}
+
+	rows := make([][]string, len(result.Cycles))
+	for i, c := range result.Cycles {
+		started := ""
+		if c.StartedAt != nil {
+			started = c.StartedAt.Format("2006-01-02")
+		}
+		completed := ""
+		if c.CompletedAt != nil {
+			completed = c.CompletedAt.Format("2006-01-02")
+		}
+		rows[i] = []string{
+			fmt.Sprintf("#%d", c.CycleNumber),
+			output.StatusColor(c.Status),
+			c.ExecutorName,
+			started,
+			completed,
+		}
+	}
+	output.Table([]string{"Cycle", "Status", "Executor", "Started", "Completed"}, rows)
+	fmt.Println()
+	return nil
+}
+
+func runJobsCycleSubmit(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	content, _ := cmd.Flags().GetString("content")
+	attachments, _ := cmd.Flags().GetStringSlice("attachment")
+
+	if content == "" && len(attachments) == 0 {
+		output.Error("Provide at least --content or --attachment")
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	cycle, err := client.SubmitCycle(args[0], api.SubmitRequest{
+		Content:     content,
+		Attachments: attachments,
+	})
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(cycle)
+	}
+
+	output.Success(fmt.Sprintf("Cycle #%d submitted — awaiting publisher review", cycle.CycleNumber))
+	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(cycle.Status))
+	return nil
+}
+
+func runJobsCycleComplete(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	cycle, err := client.CompleteCycle(args[0])
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(cycle)
+	}
+
+	output.Success(fmt.Sprintf("Cycle #%d completed — tokens settled to executor", cycle.CycleNumber))
+	fmt.Println()
+	return nil
+}
+
+func runJobsCycleRevise(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	content, _ := cmd.Flags().GetString("content")
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	cycle, err := client.RequestCycleRevision(args[0], api.RevisionRequest{Content: content})
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(cycle)
+	}
+
+	output.Success(fmt.Sprintf("Revision requested for cycle #%d", cycle.CycleNumber))
+	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(cycle.Status))
+	return nil
+}
+
+func runJobsTopUp(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	modelID, _ := cmd.Flags().GetString("model")
+	amount, _ := cmd.Flags().GetInt64("amount")
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	job, err := client.TopUpPool(args[0], []api.TokenReward{{ModelID: modelID, Amount: amount}})
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(job)
+	}
+
+	output.Success(fmt.Sprintf("Pool topped up: %s tokens added", output.FormatTokens(amount)))
+	fmt.Printf("  Pool balance: %s\n\n", formatPoolBalance(job.PoolBalance))
+	return nil
+}
+
+func runJobsPause(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	job, err := client.PauseJob(args[0])
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(job)
+	}
+
+	output.Success(fmt.Sprintf("Paused recurring task: %s", output.Bold(job.Title)))
+	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
+	return nil
+}
+
+func runJobsResume(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	job, err := client.ResumeJob(args[0])
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(job)
+	}
+
+	output.Success(fmt.Sprintf("Resumed recurring task: %s", output.Bold(job.Title)))
+	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
+	return nil
 }

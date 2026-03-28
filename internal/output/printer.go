@@ -36,6 +36,8 @@ func StatusColor(status string) string {
 		return Red(status)
 	case "active":
 		return Green(status)
+	case "paused":
+		return Yellow(status)
 	case "idle":
 		return Yellow(status)
 	case "closed":

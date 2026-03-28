@@ -48,6 +48,7 @@ func init() {
 	authRegisterCmd.Flags().String("country", "", "Country (optional)")
 	authRegisterCmd.Flags().String("bio", "", "Short bio (optional)")
 	authRegisterCmd.Flags().String("contact", "", "Contact URL or info (optional)")
+	authRegisterCmd.Flags().Bool("hidden", false, "Hide from public agent list (optional)")
 }
 
 func prompt(label string) string {
@@ -81,6 +82,7 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 	country, _ := cmd.Flags().GetString("country")
 	bio, _ := cmd.Flags().GetString("bio")
 	contact, _ := cmd.Flags().GetString("contact")
+	hidden, _ := cmd.Flags().GetBool("hidden")
 
 	if name == "" {
 		name = prompt("Agent name")
@@ -96,6 +98,7 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 		Country:    country,
 		Bio:        bio,
 		Contact:    contact,
+		Hidden:     hidden,
 	})
 	if err != nil {
 		output.Error(err.Error())

@@ -22,13 +22,25 @@ var txCmd = &cobra.Command{
 	RunE:  runTransactions,
 }
 
+var meUpdateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update your agent profile (bio, country, contact, hidden)",
+	RunE:  runMeUpdate,
+}
+
 func init() {
 	rootCmd.AddCommand(meCmd)
 	meCmd.AddCommand(txCmd)
+	meCmd.AddCommand(meUpdateCmd)
 
 	txCmd.Flags().String("model", "", "Filter by modelId")
 	txCmd.Flags().Int("page", 1, "Page number")
 	txCmd.Flags().Int("limit", 20, "Results per page")
+
+	meUpdateCmd.Flags().String("bio", "", "Short bio")
+	meUpdateCmd.Flags().String("country", "", "Country")
+	meUpdateCmd.Flags().String("contact", "", "Contact URL or info")
+	meUpdateCmd.Flags().String("hidden", "", "Set visibility: true or false")
 }
 
 func requireAuth() (*config.Config, error) {
@@ -78,6 +90,11 @@ func runMe(cmd *cobra.Command, args []string) error {
 	if profile.Contact != "" {
 		fmt.Printf("  %-16s%s\n", output.Bold("Contact:"), profile.Contact)
 	}
+	hiddenStr := output.Green("visible")
+	if profile.Hidden {
+		hiddenStr = output.Yellow("hidden")
+	}
+	fmt.Printf("  %-16s%s\n", output.Bold("Visibility:"), hiddenStr)
 
 	fmt.Println()
 	fmt.Println(output.Bold("Token Balances:"))
@@ -154,6 +171,79 @@ func colorTxType(t string) string {
 	default:
 		return t
 	}
+}
+
+func runMeUpdate(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	req := api.UpdateProfileRequest{}
+	changed := false
+
+	if cmd.Flags().Changed("bio") {
+		v, _ := cmd.Flags().GetString("bio")
+		req.Bio = &v
+		changed = true
+	}
+	if cmd.Flags().Changed("country") {
+		v, _ := cmd.Flags().GetString("country")
+		req.Country = &v
+		changed = true
+	}
+	if cmd.Flags().Changed("contact") {
+		v, _ := cmd.Flags().GetString("contact")
+		req.Contact = &v
+		changed = true
+	}
+	if cmd.Flags().Changed("hidden") {
+		v, _ := cmd.Flags().GetString("hidden")
+		switch strings.ToLower(v) {
+		case "true", "1", "yes":
+			b := true
+			req.Hidden = &b
+		case "false", "0", "no":
+			b := false
+			req.Hidden = &b
+		default:
+			output.Error("--hidden must be true or false")
+			return nil
+		}
+		changed = true
+	}
+
+	if !changed {
+		output.Warn("No fields specified. Use --bio, --country, --contact, or --hidden.")
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	profile, err := client.UpdateProfile(req)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(profile)
+	}
+
+	output.Success("Profile updated.")
+	fmt.Println()
+	output.KeyValue([][2]string{
+		{"Name", output.Bold(profile.Name)},
+		{"Country", profile.Country},
+		{"Bio", profile.Bio},
+		{"Contact", profile.Contact},
+	})
+	hiddenStr := output.Green("visible")
+	if profile.Hidden {
+		hiddenStr = output.Yellow("hidden")
+	}
+	fmt.Printf("  %-16s%s\n", output.Bold("Visibility:"), hiddenStr)
+	fmt.Println()
+	return nil
 }
 
 // formatSkills joins a skill slice for display

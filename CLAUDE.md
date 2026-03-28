@@ -1,29 +1,32 @@
 # awh CLI — Project Memory
 
-Go CLI for AgentsWorkhub (agent-to-agent task marketplace at agentsworkhub.com).
+Go CLI for AgentsWorkhub (agentsworkhub.com).
 
 ## Key Facts
-- Module: `github.com/lisiting01/agentsworkhub-cli`
-- Binary: `awh`
-- Go 1.25, Cobra framework, fatih/color
-- Config: `~/.agentsworkhub/config.json` (name, token, base_url, daemon{})
-- Auth: `X-Agent-Name` + `X-Agent-Token` headers
+- Module: `github.com/lisiting01/agentsworkhub-cli` | Binary: `awh`
+- Go 1.25, Cobra, fatih/color
+- Config: `~/.agentsworkhub/config.json` | Auth: `X-Agent-Name` + `X-Agent-Token`
 
 ## Structure
-- `cmd/` — Cobra commands (auth, me, jobs, daemon, version)
-- `internal/api/` — HTTP client wrapping all platform REST APIs
+- `cmd/` — auth, me, jobs, daemon, version
+- `internal/api/` — HTTP client (all platform REST APIs)
 - `internal/config/` — config read/write incl. DaemonConfig
-- `internal/daemon/` — daemon loop, engine (claude/codex/generic), prompt builder, state (PID/log)
+- `internal/daemon/` — poll loop, AI engine (claude/codex/generic), prompt builder
 - `internal/output/` — table/JSON printer, color helpers
 
-## Daemon Mode
-`awh daemon start` polls platform, auto-accepts tasks, runs AI engine headlessly via stdin/stdout pipe, submits result, handles revisions. PID file at `~/.agentsworkhub/daemon.pid`, log at `daemon.log`.
+## Job Modes
+- **oneoff**: open→in_progress→submitted→completed
+- **recurring**: open→active↔paused→completed; per-cycle token settlement from pool
+- Key fields: `mode`, `poolBalance`, `totalDeposited`, `cycleConfig`, `currentCycleNumber`
+- Transaction types: `pool_deposit`, `settlement`, `pool_refund`, `grant`
 
-## Release
-GoReleaser + GitHub Actions on `v*` tags. 5 platforms: windows/amd64, darwin/amd64+arm64, linux/amd64+arm64. Format: single binary (no archive).
+## Daemon
+Polls for open tasks, auto-accepts, runs AI via stdin/stdout pipe, submits, handles revisions.
+Recurring: uses `/cycles/current/submit`, loops per cycle, handles cycle revision, stops on paused/completed/cancelled.
+PID: `~/.agentsworkhub/daemon.pid` | Log: `daemon.log`
 
-## Build
+## Build & Release
 ```
-go build -o awh.exe .
+go build -o awh.exe .          # GOPROXY=https://goproxy.cn,direct (China)
 ```
-GOPROXY=https://goproxy.cn,direct for China network.
+GoReleaser + GitHub Actions on `v*` tags. 5 platforms (win/mac/linux, amd64+arm64).

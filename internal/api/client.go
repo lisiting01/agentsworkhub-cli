@@ -103,6 +103,7 @@ type RegisterRequest struct {
 	Country    string `json:"country,omitempty"`
 	Bio        string `json:"bio,omitempty"`
 	Contact    string `json:"contact,omitempty"`
+	Hidden     bool   `json:"hidden,omitempty"`
 }
 
 type RegisterResponse struct {
@@ -132,6 +133,7 @@ type AgentProfile struct {
 	Country       string         `json:"country"`
 	Bio           string         `json:"bio"`
 	Contact       string         `json:"contact"`
+	Hidden        bool           `json:"hidden"`
 	TokenBalances []TokenBalance `json:"tokenBalances"`
 	LastActiveAt  *time.Time     `json:"lastActiveAt"`
 	CreatedAt     *time.Time     `json:"createdAt"`
@@ -143,6 +145,19 @@ func (c *Client) Me() (*AgentProfile, error) {
 	return &out, err
 }
 
+type UpdateProfileRequest struct {
+	Bio     *string `json:"bio,omitempty"`
+	Country *string `json:"country,omitempty"`
+	Contact *string `json:"contact,omitempty"`
+	Hidden  *bool   `json:"hidden,omitempty"`
+}
+
+func (c *Client) UpdateProfile(req UpdateProfileRequest) (*AgentProfile, error) {
+	var out AgentProfile
+	_, err := c.do("PATCH", "/api/agents/me", req, &out)
+	return &out, err
+}
+
 // --- Jobs ---
 
 type TokenReward struct {
@@ -150,14 +165,30 @@ type TokenReward struct {
 	Amount  int64  `json:"amount"`
 }
 
+type PoolBalance struct {
+	ModelID string `json:"modelId"`
+	Balance int64  `json:"balance"`
+}
+
+type CycleConfig struct {
+	IntervalDays int    `json:"intervalDays"`
+	Description  string `json:"description,omitempty"`
+}
+
 type Job struct {
 	ID            string        `json:"_id"`
 	Title         string        `json:"title"`
 	Description   string        `json:"description"`
 	Status        string        `json:"status"`
+	Mode          string        `json:"mode"` // "oneoff" or "recurring"
 	PublisherName string        `json:"publisherName"`
 	ExecutorName  string        `json:"executorName"`
 	TokenRewards  []TokenReward `json:"tokenRewards"`
+	PoolBalance   []PoolBalance `json:"poolBalance"`
+	TotalDeposited []TokenReward `json:"totalDeposited"`
+	CycleConfig        *CycleConfig `json:"cycleConfig,omitempty"`
+	CurrentCycleNumber int          `json:"currentCycleNumber,omitempty"`
+	PausedAt           *time.Time   `json:"pausedAt,omitempty"`
 	Skills        []string      `json:"skills"`
 	Duration      string        `json:"duration"`
 	CreatedAt     *time.Time    `json:"createdAt"`
@@ -171,10 +202,13 @@ type JobListResponse struct {
 	TotalPages int   `json:"totalPages"`
 }
 
-func (c *Client) ListJobs(status, q string, page, limit int) (*JobListResponse, error) {
+func (c *Client) ListJobs(status, mode, q string, page, limit int) (*JobListResponse, error) {
 	params := url.Values{}
 	if status != "" {
 		params.Set("status", status)
+	}
+	if mode != "" {
+		params.Set("mode", mode)
 	}
 	if q != "" {
 		params.Set("q", q)
@@ -193,13 +227,16 @@ func (c *Client) GetJob(id string) (*Job, error) {
 	return &out, err
 }
 
-func (c *Client) MyJobs(role, status string, page, limit int) (*JobListResponse, error) {
+func (c *Client) MyJobs(role, status, mode string, page, limit int) (*JobListResponse, error) {
 	params := url.Values{}
 	if role != "" {
 		params.Set("role", role)
 	}
 	if status != "" {
 		params.Set("status", status)
+	}
+	if mode != "" {
+		params.Set("mode", mode)
 	}
 	params.Set("page", fmt.Sprintf("%d", page))
 	params.Set("limit", fmt.Sprintf("%d", limit))
@@ -322,5 +359,85 @@ func (c *Client) MyTransactions(modelID string, page, limit int) (*TransactionLi
 
 	var out TransactionListResponse
 	_, err := c.do("GET", "/api/agents/me/transactions?"+params.Encode(), nil, &out)
+	return &out, err
+}
+
+// --- Recurring: Cycles ---
+
+type JobCycle struct {
+	ID                  string     `json:"_id"`
+	JobID               string     `json:"jobId"`
+	CycleNumber         int        `json:"cycleNumber"`
+	Status              string     `json:"status"` // active/submitted/revision/completed/skipped
+	ExecutorName        string     `json:"executorName"`
+	StartedAt           *time.Time `json:"startedAt"`
+	SubmittedAt         *time.Time `json:"submittedAt,omitempty"`
+	CompletedAt         *time.Time `json:"completedAt,omitempty"`
+	RevisionRequestedAt *time.Time `json:"revisionRequestedAt,omitempty"`
+	CreatedAt           *time.Time `json:"createdAt"`
+	UpdatedAt           *time.Time `json:"updatedAt"`
+}
+
+type JobCycleListResponse struct {
+	Cycles     []JobCycle `json:"cycles"`
+	Total      int        `json:"total"`
+	Page       int        `json:"page"`
+	TotalPages int        `json:"totalPages"`
+}
+
+func (c *Client) ListCycles(jobID string, page, limit int) (*JobCycleListResponse, error) {
+	params := url.Values{}
+	params.Set("page", fmt.Sprintf("%d", page))
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	var out JobCycleListResponse
+	_, err := c.do("GET", "/api/jobs/"+jobID+"/cycles?"+params.Encode(), nil, &out)
+	return &out, err
+}
+
+func (c *Client) GetCurrentCycle(jobID string) (*JobCycle, error) {
+	var out JobCycle
+	_, err := c.do("GET", "/api/jobs/"+jobID+"/cycles/current", nil, &out)
+	return &out, err
+}
+
+func (c *Client) SubmitCycle(jobID string, req SubmitRequest) (*JobCycle, error) {
+	var out JobCycle
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/submit", req, &out)
+	return &out, err
+}
+
+func (c *Client) CompleteCycle(jobID string) (*JobCycle, error) {
+	var out JobCycle
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/complete", struct{}{}, &out)
+	return &out, err
+}
+
+func (c *Client) RequestCycleRevision(jobID string, req RevisionRequest) (*JobCycle, error) {
+	var out JobCycle
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/request-revision", req, &out)
+	return &out, err
+}
+
+// --- Recurring: Lifecycle ---
+
+type TopUpRequest struct {
+	Deposit []TokenReward `json:"deposit"`
+}
+
+func (c *Client) TopUpPool(jobID string, deposit []TokenReward) (*Job, error) {
+	var out Job
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/top-up", TopUpRequest{Deposit: deposit}, &out)
+	return &out, err
+}
+
+func (c *Client) PauseJob(jobID string) (*Job, error) {
+	var out Job
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/pause", struct{}{}, &out)
+	return &out, err
+}
+
+func (c *Client) ResumeJob(jobID string) (*Job, error) {
+	var out Job
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/resume", struct{}{}, &out)
 	return &out, err
 }

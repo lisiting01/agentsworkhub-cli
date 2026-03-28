@@ -84,7 +84,7 @@ func (d *Daemon) poll(ctx context.Context) error {
 	}
 
 	d.logf("Polling for open tasks...")
-	result, err := d.client.ListJobs("open", "", 1, 20)
+	result, err := d.client.ListJobs("open", "", "", 1, 20)
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}
@@ -175,12 +175,21 @@ func (d *Daemon) recoverTask(ctx context.Context, ts *TaskStatus) error {
 	case "submitted":
 		d.logf("Task %s already submitted -- waiting for feedback", job.ID)
 		return d.waitForFeedback(ctx, job)
+	case "active":
+		// Recurring task: check current cycle state
+		d.logf("Recovering recurring task %s (job active)", job.ID)
+		return d.recoverRecurringTask(ctx, job)
+	case "paused":
+		d.logf("Recurring task %s is paused -- clearing state", job.ID)
+		_ = d.state.ClearTask()
+		return nil
 	default:
 		return fmt.Errorf("task in terminal state: %s", job.Status)
 	}
 }
 
 // runTask fetches messages, builds a prompt, runs the AI engine, and submits.
+// For recurring jobs, submission goes to the current cycle endpoint.
 func (d *Daemon) runTask(ctx context.Context, job *api.Job, revisionNote string) error {
 	ts := &TaskStatus{JobID: job.ID, JobTitle: job.Title, Phase: "running_ai", StartedAt: time.Now()}
 	_ = d.state.WriteTask(ts)
@@ -211,16 +220,25 @@ func (d *Daemon) runTask(ctx context.Context, job *api.Job, revisionNote string)
 	ts.Phase = "submitting"
 	_ = d.state.WriteTask(ts)
 
-	_, err = d.client.SubmitJob(job.ID, api.SubmitRequest{Content: result})
-	if err != nil {
-		return fmt.Errorf("submit job: %w", err)
+	if job.Mode == "recurring" {
+		cycle, err := d.client.SubmitCycle(job.ID, api.SubmitRequest{Content: result})
+		if err != nil {
+			return fmt.Errorf("submit cycle: %w", err)
+		}
+		d.logf("Submitted cycle #%d for task %s", cycle.CycleNumber, job.ID)
+	} else {
+		_, err = d.client.SubmitJob(job.ID, api.SubmitRequest{Content: result})
+		if err != nil {
+			return fmt.Errorf("submit job: %w", err)
+		}
+		d.logf("Submitted task %s", job.ID)
 	}
-	d.logf("Submitted task %s", job.ID)
 
 	return d.waitForFeedback(ctx, job)
 }
 
 // waitForFeedback polls for publisher response (complete / revision_request / cancel).
+// For recurring jobs it monitors cycle-level state and loops automatically.
 func (d *Daemon) waitForFeedback(ctx context.Context, job *api.Job) error {
 	ts := &TaskStatus{JobID: job.ID, JobTitle: job.Title, Phase: "waiting_feedback", StartedAt: time.Now()}
 	_ = d.state.WriteTask(ts)
@@ -251,23 +269,94 @@ func (d *Daemon) waitForFeedback(ctx context.Context, job *api.Job) error {
 				_ = d.state.ClearTask()
 				return nil
 
+			case "paused":
+				d.logf("Recurring task %s paused by publisher -- stopping", job.ID)
+				_ = d.state.ClearTask()
+				return nil
+
 			case "revision":
+				// One-off: job-level revision
 				d.logf("Revision requested for task %s -- re-running AI...", job.ID)
 				msgResp, err := d.client.GetMessages(job.ID, 1, 100)
 				if err != nil {
 					return fmt.Errorf("get messages for revision: %w", err)
 				}
 				revNote := ExtractRevisionNote(msgResp.Messages)
-
 				ts.Phase = "rerunning"
 				_ = d.state.WriteTask(ts)
-
 				return d.runTask(ctx, updated, revNote)
 
 			case "submitted":
 				d.logf("Still waiting for feedback on task %s...", job.ID)
+
+			case "active":
+				// Recurring: check current cycle state
+				if err := d.handleActiveCycle(ctx, updated, ts); err != nil {
+					return err
+				}
 			}
 		}
+	}
+}
+
+// handleActiveCycle checks the current cycle for a recurring job and acts accordingly.
+func (d *Daemon) handleActiveCycle(ctx context.Context, job *api.Job, ts *TaskStatus) error {
+	cycle, err := d.client.GetCurrentCycle(job.ID)
+	if err != nil {
+		d.logf("[WARN] get current cycle for task %s: %v", job.ID, err)
+		return nil
+	}
+	switch cycle.Status {
+	case "submitted":
+		d.logf("Cycle #%d for task %s submitted, waiting for publisher...", cycle.CycleNumber, job.ID)
+
+	case "revision":
+		d.logf("Cycle #%d revision requested for task %s -- re-running AI...", cycle.CycleNumber, job.ID)
+		msgResp, err := d.client.GetMessages(job.ID, 1, 100)
+		if err != nil {
+			return fmt.Errorf("get messages for cycle revision: %w", err)
+		}
+		revNote := ExtractRevisionNote(msgResp.Messages)
+		ts.Phase = "rerunning"
+		_ = d.state.WriteTask(ts)
+		return d.runTask(ctx, job, revNote)
+
+	case "completed":
+		// Cycle was completed, next cycle auto-created — run the next cycle
+		d.logf("Cycle #%d completed for task %s -- starting next cycle", cycle.CycleNumber, job.ID)
+		return d.runTask(ctx, job, "")
+
+	case "active":
+		// New cycle is ready, run it
+		d.logf("New cycle #%d ready for task %s -- running AI", cycle.CycleNumber, job.ID)
+		return d.runTask(ctx, job, "")
+	}
+	return nil
+}
+
+// recoverRecurringTask resumes work on an interrupted recurring task.
+func (d *Daemon) recoverRecurringTask(ctx context.Context, job *api.Job) error {
+	cycle, err := d.client.GetCurrentCycle(job.ID)
+	if err != nil {
+		return fmt.Errorf("get current cycle: %w", err)
+	}
+	switch cycle.Status {
+	case "active":
+		d.logf("Recovering cycle #%d for recurring task %s", cycle.CycleNumber, job.ID)
+		return d.runTask(ctx, job, "")
+	case "submitted":
+		d.logf("Cycle #%d already submitted for task %s -- waiting for feedback", cycle.CycleNumber, job.ID)
+		return d.waitForFeedback(ctx, job)
+	case "revision":
+		d.logf("Cycle #%d revision pending for task %s -- re-running AI", cycle.CycleNumber, job.ID)
+		msgResp, err := d.client.GetMessages(job.ID, 1, 100)
+		if err != nil {
+			return fmt.Errorf("get messages for cycle revision: %w", err)
+		}
+		revNote := ExtractRevisionNote(msgResp.Messages)
+		return d.runTask(ctx, job, revNote)
+	default:
+		return fmt.Errorf("unexpected cycle status: %s", cycle.Status)
 	}
 }
 
