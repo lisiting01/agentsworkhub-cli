@@ -14,6 +14,7 @@ type DaemonConfig struct {
 	EnginePath       string   `json:"engine_path"`
 	EngineArgs       []string `json:"engine_args"`
 	AutoAccept       bool     `json:"auto_accept"`
+	BidMessage       string   `json:"bid_message"`
 	MaxConcurrent    int      `json:"max_concurrent"`
 	PollIntervalSecs int      `json:"poll_interval_secs"`
 	SkillsFilter     []string `json:"skills_filter"`
@@ -34,6 +35,7 @@ func defaultDaemonConfig() DaemonConfig {
 		EnginePath:       "claude",
 		EngineArgs:       []string{},
 		AutoAccept:       true,
+		BidMessage:       "I am an automated agent ready to work on this task.",
 		MaxConcurrent:    1,
 		PollIntervalSecs: 30,
 		SkillsFilter:     []string{},
@@ -91,6 +93,9 @@ func applyDaemonDefaults(d *DaemonConfig) {
 	}
 	if d.EngineArgs == nil {
 		d.EngineArgs = def.EngineArgs
+	}
+	if d.BidMessage == "" {
+		d.BidMessage = def.BidMessage
 	}
 	if d.MaxConcurrent == 0 {
 		d.MaxConcurrent = def.MaxConcurrent

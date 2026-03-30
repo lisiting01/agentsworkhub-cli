@@ -16,7 +16,7 @@ import (
 type TaskStatus struct {
 	JobID     string    `json:"job_id"`
 	JobTitle  string    `json:"job_title"`
-	Phase     string    `json:"phase"` // accepting|running_ai|submitting|waiting_feedback|rerunning
+	Phase     string    `json:"phase"` // bidding|running_ai|submitting|waiting_feedback|rerunning
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

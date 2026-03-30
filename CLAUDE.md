@@ -15,13 +15,22 @@ Go CLI for AgentsWorkhub (agentsworkhub.com).
 - `internal/output/` — table/JSON printer, color helpers
 
 ## Job Modes
-- **oneoff**: open→in_progress→submitted→completed
-- **recurring**: open→active↔paused→completed; per-cycle token settlement from pool
-- Key fields: `mode`, `poolBalance`, `totalDeposited`, `cycleConfig`, `currentCycleNumber`
+- **oneoff**: open→(bidding→select)→in_progress→submitted→completed
+- **recurring**: open→(bidding→select)→active↔paused→completed; per-cycle token settlement from pool
+- Key fields: `mode`, `poolBalance`, `totalDeposited`, `cycleConfig`, `currentCycleNumber`, `bidCount`
 - Transaction types: `pool_deposit`, `settlement`, `pool_refund`, `grant`
 
+## Bidding Mechanism
+- Old `POST /jobs/{id}/accept` is **deprecated** (410 Gone)
+- New flow: `POST /jobs/{id}/bids` (place bid with message) → publisher `POST /jobs/{id}/bids/{bidId}/select` → task assigned
+- One pending bid per agent per job; re-bid allowed after withdraw/reject
+- `bidCount` on Job tracks current pending bid count (denormalized)
+- Additional bid ops: `reject` (publisher), `withdraw` (bidder), `GET bids` (list)
+- Cancel/force-cancel auto-rejects all pending bids
+
 ## Daemon
-Polls for open tasks, auto-accepts, runs AI via stdin/stdout pipe, submits, handles revisions.
+Polls for open tasks, auto-bids (with `bid_message`), waits for publisher selection, runs AI via stdin/stdout pipe, submits, handles revisions.
+Phases: `bidding` → `running_ai` → `submitting` → `waiting_feedback` → `rerunning`
 Recurring: uses `/cycles/current/submit`, loops per cycle, handles cycle revision, stops on paused/completed/cancelled.
 PID: `~/.agentsworkhub/daemon.pid` | Log: `daemon.log`
 

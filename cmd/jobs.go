@@ -35,10 +35,46 @@ var jobsMineCmd = &cobra.Command{
 }
 
 var jobsAcceptCmd = &cobra.Command{
-	Use:   "accept <jobId>",
-	Short: "Accept an open task",
+	Use:        "accept <jobId>",
+	Short:      "[DEPRECATED] Use 'bid' instead — accept endpoint returns 410",
+	Args:       cobra.ExactArgs(1),
+	Deprecated: "use 'awh jobs bid <jobId> --message \"...\"' to place a bid instead",
+	RunE:       runJobsAccept,
+}
+
+var jobsBidCmd = &cobra.Command{
+	Use:   "bid <jobId>",
+	Short: "Place a bid on an open task",
 	Args:  cobra.ExactArgs(1),
-	RunE:  runJobsAccept,
+	RunE:  runJobsBid,
+}
+
+var jobsBidsCmd = &cobra.Command{
+	Use:   "bids <jobId>",
+	Short: "List bids for a task",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runJobsBids,
+}
+
+var jobsSelectBidCmd = &cobra.Command{
+	Use:   "select-bid <jobId> <bidId>",
+	Short: "Select a bid as the winner (publisher only)",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runJobsSelectBid,
+}
+
+var jobsRejectBidCmd = &cobra.Command{
+	Use:   "reject-bid <jobId> <bidId>",
+	Short: "Reject a bid (publisher only)",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runJobsRejectBid,
+}
+
+var jobsWithdrawBidCmd = &cobra.Command{
+	Use:   "withdraw-bid <jobId> <bidId>",
+	Short: "Withdraw your bid",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runJobsWithdrawBid,
 }
 
 var jobsSubmitCmd = &cobra.Command{
@@ -147,6 +183,11 @@ func init() {
 	jobsCmd.AddCommand(jobsViewCmd)
 	jobsCmd.AddCommand(jobsMineCmd)
 	jobsCmd.AddCommand(jobsAcceptCmd)
+	jobsCmd.AddCommand(jobsBidCmd)
+	jobsCmd.AddCommand(jobsBidsCmd)
+	jobsCmd.AddCommand(jobsSelectBidCmd)
+	jobsCmd.AddCommand(jobsRejectBidCmd)
+	jobsCmd.AddCommand(jobsWithdrawBidCmd)
 	jobsCmd.AddCommand(jobsSubmitCmd)
 	jobsCmd.AddCommand(jobsCancelCmd)
 	jobsCmd.AddCommand(jobsCompleteCmd)
@@ -198,6 +239,13 @@ func init() {
 	jobsTopUpCmd.Flags().String("model", "claude-sonnet-4-6", "Model ID to top up")
 	jobsTopUpCmd.Flags().Int64("amount", 0, "Token amount to add to pool (required)")
 	_ = jobsTopUpCmd.MarkFlagRequired("amount")
+
+	jobsBidCmd.Flags().StringP("message", "m", "", "Bid message (required)")
+	_ = jobsBidCmd.MarkFlagRequired("message")
+
+	jobsBidsCmd.Flags().String("status", "", "Filter by bid status: pending/selected/rejected/withdrawn")
+	jobsBidsCmd.Flags().Int("page", 1, "Page number")
+	jobsBidsCmd.Flags().Int("limit", 20, "Results per page")
 }
 
 func runJobsList(cmd *cobra.Command, args []string) error {
@@ -237,17 +285,22 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 
 	rows := make([][]string, len(result.Jobs))
 	for i, j := range result.Jobs {
+		bids := ""
+		if j.BidCount > 0 {
+			bids = fmt.Sprintf("%d", j.BidCount)
+		}
 		rows[i] = []string{
 			output.Truncate(j.ID, 10),
 			output.StatusColor(j.Status),
 			formatMode(j.Mode),
-			output.Truncate(j.Title, 45),
+			output.Truncate(j.Title, 40),
 			j.PublisherName,
+			bids,
 			formatRewards(j.TokenRewards),
 			formatSkills(j.Skills),
 		}
 	}
-	output.Table([]string{"ID", "Status", "Mode", "Title", "Publisher", "Reward/Cycle", "Skills"}, rows)
+	output.Table([]string{"ID", "Status", "Mode", "Title", "Publisher", "Bids", "Reward/Cycle", "Skills"}, rows)
 	fmt.Println()
 	return nil
 }
@@ -328,13 +381,101 @@ func runJobsMine(cmd *cobra.Command, args []string) error {
 }
 
 func runJobsAccept(cmd *cobra.Command, args []string) error {
+	output.Warn("The accept endpoint has been deprecated (410 Gone).")
+	fmt.Println("  Use the bidding flow instead:")
+	fmt.Printf("    awh jobs bid %s --message \"your bid message\"\n\n", args[0])
+	return nil
+}
+
+func runJobsBid(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	message, _ := cmd.Flags().GetString("message")
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	bid, err := client.PlaceBid(args[0], message)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(bid)
+	}
+
+	output.Success(fmt.Sprintf("Bid placed on job %s", output.Cyan(args[0])))
+	fmt.Printf("  Bid ID:  %s\n", bid.ID)
+	fmt.Printf("  Status:  %s\n\n", output.StatusColor(bid.Status))
+	return nil
+}
+
+func runJobsBids(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if baseURLOverride != "" {
+		cfg.BaseURL = baseURLOverride
+	}
+
+	status, _ := cmd.Flags().GetString("status")
+	page, _ := cmd.Flags().GetInt("page")
+	limit, _ := cmd.Flags().GetInt("limit")
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	result, err := client.ListBids(args[0], status, page, limit)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(result)
+	}
+
+	fmt.Printf("\nBids for job %s (page %d/%d, total %d)\n\n",
+		output.Cyan(args[0]), result.Page, result.TotalPages, result.Total)
+
+	if len(result.Bids) == 0 {
+		fmt.Println("  No bids found.")
+		fmt.Println()
+		return nil
+	}
+
+	rows := make([][]string, len(result.Bids))
+	for i, b := range result.Bids {
+		date := ""
+		if b.CreatedAt != nil {
+			date = b.CreatedAt.Format("2006-01-02 15:04")
+		}
+		msg := output.Truncate(b.Message, 40)
+		if msg == "" {
+			msg = output.Faint("(hidden)")
+		}
+		rows[i] = []string{
+			output.Truncate(b.ID, 10),
+			b.BidderName,
+			bidStatusColor(b.Status),
+			msg,
+			date,
+		}
+	}
+	output.Table([]string{"Bid ID", "Bidder", "Status", "Message", "Created"}, rows)
+	fmt.Println()
+	return nil
+}
+
+func runJobsSelectBid(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
 		return nil
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	job, err := client.AcceptJob(args[0])
+	job, err := client.SelectBid(args[0], args[1])
 	if err != nil {
 		output.Error(err.Error())
 		return nil
@@ -344,9 +485,61 @@ func runJobsAccept(cmd *cobra.Command, args []string) error {
 		return output.JSON(job)
 	}
 
-	output.Success(fmt.Sprintf("Accepted task: %s", output.Bold(job.Title)))
+	output.Success(fmt.Sprintf("Bid selected! Executor: %s", output.Bold(job.ExecutorName)))
+	fmt.Printf("  Task:   %s\n", output.Bold(job.Title))
 	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
 	return nil
+}
+
+func runJobsRejectBid(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	err = client.RejectBid(args[0], args[1])
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	output.Success("Bid rejected")
+	fmt.Println()
+	return nil
+}
+
+func runJobsWithdrawBid(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	err = client.WithdrawBid(args[0], args[1])
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	output.Success("Bid withdrawn")
+	fmt.Println()
+	return nil
+}
+
+func bidStatusColor(status string) string {
+	switch status {
+	case "pending":
+		return output.Yellow(status)
+	case "selected":
+		return output.Green(status)
+	case "rejected":
+		return output.Red(status)
+	case "withdrawn":
+		return output.Faint(status)
+	default:
+		return status
+	}
 }
 
 func runJobsSubmit(cmd *cobra.Command, args []string) error {
@@ -559,6 +752,9 @@ func printJob(job *api.Job) {
 	})
 	if job.ExecutorName != "" {
 		fmt.Printf("  %-20s%s\n", output.Bold("Executor:"), job.ExecutorName)
+	}
+	if job.Status == "open" && job.BidCount > 0 {
+		fmt.Printf("  %-20s%d\n", output.Bold("Bids:"), job.BidCount)
 	}
 	if job.Duration != "" {
 		fmt.Printf("  %-20s%s\n", output.Bold("Duration:"), job.Duration)

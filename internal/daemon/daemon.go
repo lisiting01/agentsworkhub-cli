@@ -44,7 +44,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer d.state.ClearPID()
 	defer d.state.ClearTask()
 
-	d.logf("Daemon started. Agent: %s | Engine: %s | Poll: %ds | AutoAccept: %v",
+	d.logf("Daemon started. Agent: %s | Engine: %s | Poll: %ds | AutoBid: %v",
 		d.cfg.Name, d.cfg.Daemon.Engine,
 		d.cfg.Daemon.PollIntervalSecs, d.cfg.Daemon.AutoAccept)
 
@@ -138,21 +138,66 @@ func skillsMatch(jobSkills, filter []string) bool {
 	return false
 }
 
-// processJob runs the full pipeline for a single task.
+// processJob places a bid and waits for the publisher to select it.
 func (d *Daemon) processJob(ctx context.Context, job *api.Job) error {
-	d.logf("Accepting task %s: %s", job.ID, job.Title)
+	d.logf("Placing bid on task %s: %s", job.ID, job.Title)
 
-	ts := &TaskStatus{JobID: job.ID, JobTitle: job.Title, Phase: "accepting", StartedAt: time.Now()}
+	ts := &TaskStatus{JobID: job.ID, JobTitle: job.Title, Phase: "bidding", StartedAt: time.Now()}
 	_ = d.state.WriteTask(ts)
 
-	accepted, err := d.client.AcceptJob(job.ID)
+	bid, err := d.client.PlaceBid(job.ID, d.cfg.Daemon.BidMessage)
 	if err != nil {
 		_ = d.state.ClearTask()
-		return fmt.Errorf("accept job: %w", err)
+		return fmt.Errorf("place bid: %w", err)
 	}
-	d.logf("Accepted task %s", accepted.ID)
+	d.logf("Bid placed on task %s (bid: %s)", job.ID, bid.ID)
 
-	return d.runTask(ctx, accepted, "")
+	return d.waitForSelection(ctx, job, bid.ID)
+}
+
+// waitForSelection polls until the bid is selected (or rejected/job cancelled).
+func (d *Daemon) waitForSelection(ctx context.Context, job *api.Job, bidID string) error {
+	d.logf("Waiting for publisher to select bid on task %s...", job.ID)
+
+	ticker := time.NewTicker(time.Duration(d.cfg.Daemon.PollIntervalSecs) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			updated, err := d.client.GetJob(job.ID)
+			if err != nil {
+				d.logf("[WARN] get job status: %v", err)
+				continue
+			}
+
+			switch updated.Status {
+			case "open":
+				d.logf("Task %s still open, waiting for selection...", job.ID)
+
+			case "in_progress", "active":
+				if updated.ExecutorName == d.cfg.Name {
+					d.logf("Bid selected! Starting work on task %s", job.ID)
+					return d.runTask(ctx, updated, "")
+				}
+				d.logf("Task %s assigned to another agent (%s) -- moving on", job.ID, updated.ExecutorName)
+				_ = d.state.ClearTask()
+				return nil
+
+			case "cancelled":
+				d.logf("Task %s was cancelled while bidding", job.ID)
+				_ = d.state.ClearTask()
+				return nil
+
+			default:
+				d.logf("Task %s in unexpected status %s while waiting for selection -- clearing", job.ID, updated.Status)
+				_ = d.state.ClearTask()
+				return nil
+			}
+		}
+	}
 }
 
 // recoverTask attempts to resume work on a task that was interrupted.
@@ -161,6 +206,12 @@ func (d *Daemon) recoverTask(ctx context.Context, ts *TaskStatus) error {
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
+
+	// If we were in bidding phase, check if we got selected
+	if ts.Phase == "bidding" {
+		return d.recoverBidding(ctx, job)
+	}
+
 	switch job.Status {
 	case "in_progress", "revision":
 		d.logf("Recovering task %s (status: %s)", job.ID, job.Status)
@@ -176,7 +227,6 @@ func (d *Daemon) recoverTask(ctx context.Context, ts *TaskStatus) error {
 		d.logf("Task %s already submitted -- waiting for feedback", job.ID)
 		return d.waitForFeedback(ctx, job)
 	case "active":
-		// Recurring task: check current cycle state
 		d.logf("Recovering recurring task %s (job active)", job.ID)
 		return d.recoverRecurringTask(ctx, job)
 	case "paused":
@@ -185,6 +235,27 @@ func (d *Daemon) recoverTask(ctx context.Context, ts *TaskStatus) error {
 		return nil
 	default:
 		return fmt.Errorf("task in terminal state: %s", job.Status)
+	}
+}
+
+// recoverBidding resumes the bid-waiting flow after a daemon restart.
+func (d *Daemon) recoverBidding(ctx context.Context, job *api.Job) error {
+	switch job.Status {
+	case "open":
+		d.logf("Recovering bidding state for task %s -- still open, resuming wait", job.ID)
+		return d.waitForSelection(ctx, job, "")
+	case "in_progress", "active":
+		if job.ExecutorName == d.cfg.Name {
+			d.logf("Bid was selected while offline! Starting work on task %s", job.ID)
+			return d.runTask(ctx, job, "")
+		}
+		d.logf("Task %s assigned to another agent -- clearing", job.ID)
+		_ = d.state.ClearTask()
+		return nil
+	default:
+		d.logf("Task %s in status %s after bidding -- clearing", job.ID, job.Status)
+		_ = d.state.ClearTask()
+		return nil
 	}
 }
 

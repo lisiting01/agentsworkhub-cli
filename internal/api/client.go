@@ -186,6 +186,7 @@ type Job struct {
 	TokenRewards  []TokenReward `json:"tokenRewards"`
 	PoolBalance   []PoolBalance `json:"poolBalance"`
 	TotalDeposited []TokenReward `json:"totalDeposited"`
+	BidCount           int          `json:"bidCount"`
 	CycleConfig        *CycleConfig `json:"cycleConfig,omitempty"`
 	CurrentCycleNumber int          `json:"currentCycleNumber,omitempty"`
 	PausedAt           *time.Time   `json:"pausedAt,omitempty"`
@@ -246,10 +247,69 @@ func (c *Client) MyJobs(role, status, mode string, page, limit int) (*JobListRes
 	return &out, err
 }
 
+// Deprecated: server returns 410. Use PlaceBid + SelectBid instead.
 func (c *Client) AcceptJob(id string) (*Job, error) {
 	var out Job
 	_, err := c.do("POST", "/api/jobs/"+id+"/accept", struct{}{}, &out)
 	return &out, err
+}
+
+// --- Bids ---
+
+type Bid struct {
+	ID         string     `json:"_id"`
+	JobID      string     `json:"jobId"`
+	BidderID   string     `json:"bidderId"`
+	BidderName string     `json:"bidderName"`
+	Message    string     `json:"message,omitempty"`
+	Status     string     `json:"status"` // pending/selected/rejected/withdrawn
+	CreatedAt  *time.Time `json:"createdAt"`
+	UpdatedAt  *time.Time `json:"updatedAt"`
+}
+
+type BidListResponse struct {
+	Bids       []Bid `json:"bids"`
+	Total      int   `json:"total"`
+	Page       int   `json:"page"`
+	TotalPages int   `json:"totalPages"`
+}
+
+type PlaceBidRequest struct {
+	Message string `json:"message"`
+}
+
+func (c *Client) PlaceBid(jobID, message string) (*Bid, error) {
+	var out Bid
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/bids", PlaceBidRequest{Message: message}, &out)
+	return &out, err
+}
+
+func (c *Client) ListBids(jobID, status string, page, limit int) (*BidListResponse, error) {
+	params := url.Values{}
+	if status != "" {
+		params.Set("status", status)
+	}
+	params.Set("page", fmt.Sprintf("%d", page))
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	var out BidListResponse
+	_, err := c.do("GET", "/api/jobs/"+jobID+"/bids?"+params.Encode(), nil, &out)
+	return &out, err
+}
+
+func (c *Client) SelectBid(jobID, bidID string) (*Job, error) {
+	var out Job
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/bids/"+bidID+"/select", struct{}{}, &out)
+	return &out, err
+}
+
+func (c *Client) RejectBid(jobID, bidID string) error {
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/bids/"+bidID+"/reject", struct{}{}, nil)
+	return err
+}
+
+func (c *Client) WithdrawBid(jobID, bidID string) error {
+	_, err := c.do("POST", "/api/jobs/"+jobID+"/bids/"+bidID+"/withdraw", struct{}{}, nil)
+	return err
 }
 
 type SubmitRequest struct {
