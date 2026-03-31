@@ -30,9 +30,9 @@ func NewState(configDir string) *State {
 	return &State{dir: configDir}
 }
 
-func (s *State) pidPath() string    { return filepath.Join(s.dir, "daemon.pid") }
-func (s *State) logPath() string    { return filepath.Join(s.dir, "daemon.log") }
-func (s *State) taskPath() string   { return filepath.Join(s.dir, "daemon.task.json") }
+func (s *State) pidPath() string  { return filepath.Join(s.dir, "patrol.pid") }
+func (s *State) logPath() string  { return filepath.Join(s.dir, "patrol.log") }
+func (s *State) taskPath() string { return filepath.Join(s.dir, "patrol.task.json") }
 
 // --- PID ---
 

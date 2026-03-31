@@ -27,7 +27,7 @@ type Daemon struct {
 // New creates a Daemon from the given config and state.
 func New(cfg *config.Config, st *State, logWriter io.Writer) *Daemon {
 	logger := log.New(logWriter, "", log.LstdFlags)
-	eng := NewEngine(cfg.Daemon.Engine, cfg.Daemon.EnginePath, cfg.Daemon.EngineArgs)
+	eng := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineArgs)
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	return &Daemon{cfg: cfg, client: client, engine: eng, state: st, logger: logger}
 }
@@ -44,11 +44,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer d.state.ClearPID()
 	defer d.state.ClearTask()
 
-	d.logf("Daemon started. Agent: %s | Engine: %s | Poll: %ds | AutoBid: %v",
-		d.cfg.Name, d.cfg.Daemon.Engine,
-		d.cfg.Daemon.PollIntervalSecs, d.cfg.Daemon.AutoAccept)
+	d.logf("Patrol started. Agent: %s | Engine: %s | Poll: %ds | AutoBid: %v",
+		d.cfg.Name, d.cfg.Patrol.Engine,
+		d.cfg.Patrol.PollIntervalSecs, d.cfg.Patrol.AutoAccept)
 
-	interval := time.Duration(d.cfg.Daemon.PollIntervalSecs) * time.Second
+	interval := time.Duration(d.cfg.Patrol.PollIntervalSecs) * time.Second
 
 	// Check if there's a leftover task from a previous run
 	if prev, _ := d.state.ReadTask(); prev != nil {
@@ -65,7 +65,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			d.logf("Daemon stopping (signal received)")
+			d.logf("Patrol stopping (signal received)")
 			return nil
 		case <-ticker.C:
 			if err := d.poll(ctx); err != nil {
@@ -96,11 +96,11 @@ func (d *Daemon) poll(ctx context.Context) error {
 
 	job := d.findMatch(result.Jobs)
 	if job == nil {
-		d.logf("No matching tasks (skills filter: [%s])", strings.Join(d.cfg.Daemon.SkillsFilter, ", "))
+		d.logf("No matching tasks (skills filter: [%s])", strings.Join(d.cfg.Patrol.SkillsFilter, ", "))
 		return nil
 	}
 
-	if !d.cfg.Daemon.AutoAccept {
+	if !d.cfg.Patrol.AutoAccept {
 		d.logf("Found task %s (%s) -- auto_accept is off, skipping", job.ID, job.Title)
 		return nil
 	}
@@ -110,7 +110,7 @@ func (d *Daemon) poll(ctx context.Context) error {
 
 // findMatch returns the first job that passes the skills filter.
 func (d *Daemon) findMatch(jobs []api.Job) *api.Job {
-	filter := d.cfg.Daemon.SkillsFilter
+	filter := d.cfg.Patrol.SkillsFilter
 	for i := range jobs {
 		j := &jobs[i]
 		if j.PublisherName == d.cfg.Name {
@@ -145,7 +145,7 @@ func (d *Daemon) processJob(ctx context.Context, job *api.Job) error {
 	ts := &TaskStatus{JobID: job.ID, JobTitle: job.Title, Phase: "bidding", StartedAt: time.Now()}
 	_ = d.state.WriteTask(ts)
 
-	bid, err := d.client.PlaceBid(job.ID, d.cfg.Daemon.BidMessage)
+	bid, err := d.client.PlaceBid(job.ID, d.cfg.Patrol.BidMessage)
 	if err != nil {
 		_ = d.state.ClearTask()
 		return fmt.Errorf("place bid: %w", err)
@@ -159,7 +159,7 @@ func (d *Daemon) processJob(ctx context.Context, job *api.Job) error {
 func (d *Daemon) waitForSelection(ctx context.Context, job *api.Job, bidID string) error {
 	d.logf("Waiting for publisher to select bid on task %s...", job.ID)
 
-	ticker := time.NewTicker(time.Duration(d.cfg.Daemon.PollIntervalSecs) * time.Second)
+	ticker := time.NewTicker(time.Duration(d.cfg.Patrol.PollIntervalSecs) * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -274,11 +274,11 @@ func (d *Daemon) runTask(ctx context.Context, job *api.Job, revisionNote string)
 	prompt := BuildPrompt(job, msgResp.Messages, revisionNote)
 	d.logf("Running AI engine (%s) for task %s...", d.engine.Name(), job.ID)
 
-	timeout := time.Duration(d.cfg.Daemon.TaskTimeoutMins) * time.Minute
+	timeout := time.Duration(d.cfg.Patrol.TaskTimeoutMins) * time.Minute
 	aiCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	workDir := d.cfg.Daemon.WorkDir
+	workDir := d.cfg.Patrol.WorkDir
 
 	result, err := d.engine.Run(aiCtx, prompt, workDir)
 	if err != nil {
@@ -316,7 +316,7 @@ func (d *Daemon) waitForFeedback(ctx context.Context, job *api.Job) error {
 
 	d.logf("Waiting for publisher feedback on task %s...", job.ID)
 
-	ticker := time.NewTicker(time.Duration(d.cfg.Daemon.PollIntervalSecs) * time.Second)
+	ticker := time.NewTicker(time.Duration(d.cfg.Patrol.PollIntervalSecs) * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -435,7 +435,7 @@ func (d *Daemon) recoverRecurringTask(ctx context.Context, job *api.Job) error {
 func (d *Daemon) notifyError(jobID, msg string) error {
 	_, err := d.client.SendMessage(jobID, api.SendMessageRequest{
 		Type:    "message",
-		Content: fmt.Sprintf("[awh-daemon] Error: %s", msg),
+		Content: fmt.Sprintf("[awh-patrol] Error: %s", msg),
 	})
 	return err
 }

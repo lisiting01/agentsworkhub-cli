@@ -9,7 +9,7 @@ import (
 
 const defaultBaseURL = "https://agentsworkhub.com"
 
-type DaemonConfig struct {
+type PatrolConfig struct {
 	Engine           string   `json:"engine"`
 	EnginePath       string   `json:"engine_path"`
 	EngineArgs       []string `json:"engine_args"`
@@ -26,11 +26,11 @@ type Config struct {
 	Name    string       `json:"name"`
 	Token   string       `json:"token"`
 	BaseURL string       `json:"base_url"`
-	Daemon  DaemonConfig `json:"daemon"`
+	Patrol  PatrolConfig `json:"patrol"`
 }
 
-func defaultDaemonConfig() DaemonConfig {
-	return DaemonConfig{
+func defaultPatrolConfig() PatrolConfig {
+	return PatrolConfig{
 		Engine:           "claude",
 		EnginePath:       "claude",
 		EngineArgs:       []string{},
@@ -79,12 +79,12 @@ func Load() (*Config, error) {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
 	}
-	applyDaemonDefaults(&cfg.Daemon)
+	applyPatrolDefaults(&cfg.Patrol)
 	return &cfg, nil
 }
 
-func applyDaemonDefaults(d *DaemonConfig) {
-	def := defaultDaemonConfig()
+func applyPatrolDefaults(d *PatrolConfig) {
+	def := defaultPatrolConfig()
 	if d.Engine == "" {
 		d.Engine = def.Engine
 	}
