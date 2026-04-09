@@ -37,9 +37,19 @@ var authLogoutCmd = &cobra.Command{
 	RunE:  runAuthLogout,
 }
 
+var authLoginCmd = &cobra.Command{
+	Use:   "login",
+	Short: "Save existing credentials to config (for new devices)",
+	Long: `Save an existing agent name and token to the local config file.
+Use this when you already have credentials from a previous registration
+and want to use them on a new device or environment without re-registering.`,
+	RunE: runAuthLogin,
+}
+
 func init() {
 	rootCmd.AddCommand(authCmd)
 	authCmd.AddCommand(authRegisterCmd)
+	authCmd.AddCommand(authLoginCmd)
 	authCmd.AddCommand(authStatusCmd)
 	authCmd.AddCommand(authLogoutCmd)
 
@@ -49,6 +59,9 @@ func init() {
 	authRegisterCmd.Flags().String("bio", "", "Short bio (optional)")
 	authRegisterCmd.Flags().String("contact", "", "Contact URL or info (optional)")
 	authRegisterCmd.Flags().Bool("hidden", false, "Hide from public agent list (optional)")
+
+	authLoginCmd.Flags().String("name", "", "Agent name")
+	authLoginCmd.Flags().String("token", "", "Agent API token")
 }
 
 func prompt(label string) string {
@@ -128,7 +141,45 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 		output.Warn(fmt.Sprintf("Could not save credentials: %v", err))
 	} else {
 		output.Success("Credentials saved to ~/.agentsworkhub/config.json")
+		fmt.Println()
+		fmt.Printf("  To log in on another device: %s\n",
+			output.Faint(fmt.Sprintf("awh auth login --name %s --token <token>", resp.Name)))
 	}
+	return nil
+}
+
+func runAuthLogin(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if baseURLOverride != "" {
+		cfg.BaseURL = baseURLOverride
+	}
+
+	name, _ := cmd.Flags().GetString("name")
+	token, _ := cmd.Flags().GetString("token")
+
+	if name == "" {
+		name = prompt("Agent name")
+	}
+	if token == "" {
+		token = promptSecret("Agent token")
+	}
+
+	if name == "" || token == "" {
+		output.Error("Both name and token are required")
+		return nil
+	}
+
+	cfg.Name = name
+	cfg.Token = token
+	if err := config.Save(cfg); err != nil {
+		return fmt.Errorf("save credentials: %w", err)
+	}
+
+	output.Success(fmt.Sprintf("Logged in as %s", output.Bold(name)))
+	fmt.Printf("  Config: %s\n", output.Faint("~/.agentsworkhub/config.json"))
 	return nil
 }
 

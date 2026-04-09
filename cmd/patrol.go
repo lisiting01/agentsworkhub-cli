@@ -18,9 +18,10 @@ import (
 var patrolCmd = &cobra.Command{
 	Use:   "patrol",
 	Short: "Manage the patrol mode (background agent)",
-	Long: `Patrol mode watches AgentsWorkhub for open tasks, automatically bids on
-matching ones, runs your local AI engine (Claude Code, Codex, etc.) headlessly
-to complete the work, and submits results -- all without touching your main AI session.`,
+	Long: `Patrol mode watches AgentsWorkhub and acts autonomously in the background.
+
+Executor role (default): polls for open tasks, auto-bids, runs AI engine, submits.
+Publisher role: monitors your published jobs, auto-selects bids, auto-completes submissions.`,
 }
 
 var patrolStartCmd = &cobra.Command{
@@ -69,14 +70,19 @@ func init() {
 	patrolCmd.AddCommand(patrolConfigCmd)
 	patrolConfigCmd.AddCommand(patrolConfigSetCmd)
 
-	patrolStartCmd.Flags().String("engine", "", "AI engine: claude, codex, generic")
-	patrolStartCmd.Flags().String("engine-path", "", "Path to AI engine binary")
-	patrolStartCmd.Flags().Bool("auto-accept", true, "Automatically accept matching tasks")
+	patrolStartCmd.Flags().String("role", "executor", "Patrol role: executor or publisher")
+	patrolStartCmd.Flags().String("engine", "", "AI engine: claude, codex, generic (executor only)")
+	patrolStartCmd.Flags().String("engine-path", "", "Path to AI engine binary (executor only)")
+	patrolStartCmd.Flags().Bool("auto-bid", true, "Automatically place a bid on matching tasks (executor only)")
 	patrolStartCmd.Flags().Int("poll", 0, "Poll interval in seconds (overrides config)")
-	patrolStartCmd.Flags().StringSlice("skills", nil, "Only accept tasks with these skills (comma-separated)")
+	patrolStartCmd.Flags().StringSlice("skills", nil, "Only accept tasks with these skills (executor only, comma-separated)")
 	patrolStartCmd.Flags().BoolP("foreground", "f", false, "Run in foreground (for debugging)")
 	patrolStartCmd.Flags().Bool("_daemonize", false, "internal: run as background child")
 	patrolStartCmd.Flags().MarkHidden("_daemonize")
+
+	// Publisher-role flags
+	patrolStartCmd.Flags().Bool("auto-select-bid", false, "Auto-select first bid on your open jobs (publisher only)")
+	patrolStartCmd.Flags().Bool("auto-complete", false, "Auto-complete submitted jobs (publisher only)")
 
 	patrolLogsCmd.Flags().BoolP("follow", "f", false, "Follow the log (tail -f style)")
 	patrolLogsCmd.Flags().Int("lines", 50, "Number of lines to show")
@@ -109,21 +115,35 @@ func runPatrolStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	role, _ := cmd.Flags().GetString("role")
+	if role != "executor" && role != "publisher" {
+		output.Error(fmt.Sprintf("Unknown role %q. Use 'executor' or 'publisher'", role))
+		return nil
+	}
+
 	if v, _ := cmd.Flags().GetString("engine"); v != "" {
 		cfg.Patrol.Engine = v
 	}
 	if v, _ := cmd.Flags().GetString("engine-path"); v != "" {
 		cfg.Patrol.EnginePath = v
 	}
-	if cmd.Flags().Changed("auto-accept") {
-		v, _ := cmd.Flags().GetBool("auto-accept")
-		cfg.Patrol.AutoAccept = v
+	if cmd.Flags().Changed("auto-bid") {
+		v, _ := cmd.Flags().GetBool("auto-bid")
+		cfg.Patrol.AutoBid = v
 	}
 	if v, _ := cmd.Flags().GetInt("poll"); v > 0 {
 		cfg.Patrol.PollIntervalSecs = v
 	}
 	if v, _ := cmd.Flags().GetStringSlice("skills"); len(v) > 0 {
 		cfg.Patrol.SkillsFilter = v
+	}
+	if cmd.Flags().Changed("auto-select-bid") {
+		v, _ := cmd.Flags().GetBool("auto-select-bid")
+		cfg.Patrol.PublisherAutoSelectBid = v
+	}
+	if cmd.Flags().Changed("auto-complete") {
+		v, _ := cmd.Flags().GetBool("auto-complete")
+		cfg.Patrol.PublisherAutoComplete = v
 	}
 
 	running, pid, _ := st.IsRunning()
@@ -139,7 +159,7 @@ func runPatrolStart(cmd *cobra.Command, args []string) error {
 		return startPatrolBackground(cmd, st, cfg)
 	}
 
-	return runPatrolForeground(cfg, st, isDaemonChild)
+	return runPatrolForeground(cfg, st, role, isDaemonChild)
 }
 
 // startPatrolBackground re-execs this binary as a detached background process.
@@ -183,8 +203,15 @@ func startPatrolBackground(cobraCmd *cobra.Command, st *daemon.State, cfg *confi
 		}
 	}
 
-	output.Success(fmt.Sprintf("Patrol started (PID %d)", childPID))
-	fmt.Printf("  Engine: %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
+	role, _ := cobraCmd.Flags().GetString("role")
+
+	output.Success(fmt.Sprintf("Patrol [%s] started (PID %d)", role, childPID))
+	if role == "publisher" {
+		fmt.Printf("  AutoSelectBid: %v\n", cfg.Patrol.PublisherAutoSelectBid)
+		fmt.Printf("  AutoComplete:  %v\n", cfg.Patrol.PublisherAutoComplete)
+	} else {
+		fmt.Printf("  Engine: %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
+	}
 	fmt.Printf("  Poll:   every %ds\n", cfg.Patrol.PollIntervalSecs)
 	fmt.Printf("  Logs:   %s\n", st.LogPath())
 	fmt.Printf("  Stop:   awh patrol stop\n")
@@ -196,15 +223,18 @@ func buildChildArgs(cobraCmd *cobra.Command) []string {
 	var args []string
 	args = append(args, "patrol", "start", "--_daemonize")
 
+	if v, _ := cobraCmd.Flags().GetString("role"); v != "" && v != "executor" {
+		args = append(args, "--role", v)
+	}
 	if v, _ := cobraCmd.Flags().GetString("engine"); v != "" {
 		args = append(args, "--engine", v)
 	}
 	if v, _ := cobraCmd.Flags().GetString("engine-path"); v != "" {
 		args = append(args, "--engine-path", v)
 	}
-	if cobraCmd.Flags().Changed("auto-accept") {
-		v, _ := cobraCmd.Flags().GetBool("auto-accept")
-		args = append(args, fmt.Sprintf("--auto-accept=%v", v))
+	if cobraCmd.Flags().Changed("auto-bid") {
+		v, _ := cobraCmd.Flags().GetBool("auto-bid")
+		args = append(args, fmt.Sprintf("--auto-bid=%v", v))
 	}
 	if v, _ := cobraCmd.Flags().GetInt("poll"); v > 0 {
 		args = append(args, "--poll", fmt.Sprintf("%d", v))
@@ -213,6 +243,14 @@ func buildChildArgs(cobraCmd *cobra.Command) []string {
 		for _, s := range v {
 			args = append(args, "--skills", s)
 		}
+	}
+	if cobraCmd.Flags().Changed("auto-select-bid") {
+		v, _ := cobraCmd.Flags().GetBool("auto-select-bid")
+		args = append(args, fmt.Sprintf("--auto-select-bid=%v", v))
+	}
+	if cobraCmd.Flags().Changed("auto-complete") {
+		v, _ := cobraCmd.Flags().GetBool("auto-complete")
+		args = append(args, fmt.Sprintf("--auto-complete=%v", v))
 	}
 
 	if baseURLOverride != "" {
@@ -231,7 +269,7 @@ func processStillAlive(pid int) bool {
 }
 
 // runPatrolForeground runs the patrol loop in the current process (child or --foreground).
-func runPatrolForeground(cfg *config.Config, st *daemon.State, isDaemonChild bool) error {
+func runPatrolForeground(cfg *config.Config, st *daemon.State, role string, isDaemonChild bool) error {
 	logFile, err := st.OpenLog()
 	var logWriter io.Writer
 	if err != nil {
@@ -251,15 +289,26 @@ func runPatrolForeground(cfg *config.Config, st *daemon.State, isDaemonChild boo
 	}
 
 	if !isDaemonChild {
-		fmt.Printf("%s Starting patrol (PID %d)\n", output.Cyan("[awh]"), os.Getpid())
-		fmt.Printf("  Engine:     %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
-		fmt.Printf("  Poll:       every %ds\n", cfg.Patrol.PollIntervalSecs)
-		fmt.Printf("  AutoAccept: %v\n", cfg.Patrol.AutoAccept)
-		if len(cfg.Patrol.SkillsFilter) > 0 {
-			fmt.Printf("  Skills filter: %v\n", cfg.Patrol.SkillsFilter)
+		fmt.Printf("%s Starting patrol [%s] (PID %d)\n", output.Cyan("[awh]"), role, os.Getpid())
+		if role == "publisher" {
+			fmt.Printf("  AutoSelectBid: %v\n", cfg.Patrol.PublisherAutoSelectBid)
+			fmt.Printf("  AutoComplete:  %v\n", cfg.Patrol.PublisherAutoComplete)
+			fmt.Printf("  Strategy:      %s\n", cfg.Patrol.PublisherSelectStrategy)
+		} else {
+			fmt.Printf("  Engine:     %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
+			fmt.Printf("  AutoBid:    %v\n", cfg.Patrol.AutoBid)
+			if len(cfg.Patrol.SkillsFilter) > 0 {
+				fmt.Printf("  Skills filter: %v\n", cfg.Patrol.SkillsFilter)
+			}
 		}
+		fmt.Printf("  Poll:       every %ds\n", cfg.Patrol.PollIntervalSecs)
 		fmt.Printf("  Logs:       %s\n\n", st.LogPath())
 		fmt.Printf("Press Ctrl+C to stop.\n\n")
+	}
+
+	if role == "publisher" {
+		pub := daemon.NewPublisher(cfg, st, logWriter)
+		return pub.Run(context.Background())
 	}
 
 	d := daemon.New(cfg, st, logWriter)
@@ -442,8 +491,10 @@ func applyPatrolConfigKey(d *config.PatrolConfig, key, val string) error {
 		d.Engine = val
 	case "engine_path":
 		d.EnginePath = val
-	case "auto_accept":
-		d.AutoAccept = val == "true" || val == "1"
+	case "auto_bid":
+		d.AutoBid = val == "true" || val == "1"
+	case "auto_accept": // deprecated alias for auto_bid
+		d.AutoBid = val == "true" || val == "1"
 	case "poll_interval_secs":
 		n := 0
 		fmt.Sscanf(val, "%d", &n)
@@ -460,6 +511,12 @@ func applyPatrolConfigKey(d *config.PatrolConfig, key, val string) error {
 		d.WorkDir = val
 	case "bid_message":
 		d.BidMessage = val
+	case "publisher_auto_select_bid":
+		d.PublisherAutoSelectBid = val == "true" || val == "1"
+	case "publisher_auto_complete":
+		d.PublisherAutoComplete = val == "true" || val == "1"
+	case "publisher_select_strategy":
+		d.PublisherSelectStrategy = val
 	default:
 		return fmt.Errorf("unknown config key")
 	}

@@ -46,7 +46,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.logf("Patrol started. Agent: %s | Engine: %s | Poll: %ds | AutoBid: %v",
 		d.cfg.Name, d.cfg.Patrol.Engine,
-		d.cfg.Patrol.PollIntervalSecs, d.cfg.Patrol.AutoAccept)
+		d.cfg.Patrol.PollIntervalSecs, d.cfg.Patrol.AutoBid)
 
 	interval := time.Duration(d.cfg.Patrol.PollIntervalSecs) * time.Second
 
@@ -100,8 +100,8 @@ func (d *Daemon) poll(ctx context.Context) error {
 		return nil
 	}
 
-	if !d.cfg.Patrol.AutoAccept {
-		d.logf("Found task %s (%s) -- auto_accept is off, skipping", job.ID, job.Title)
+	if !d.cfg.Patrol.AutoBid {
+		d.logf("Found task %s (%s) -- auto_bid is off, skipping", job.ID, job.Title)
 		return nil
 	}
 

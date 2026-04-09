@@ -7,19 +7,45 @@ import (
 	"path/filepath"
 )
 
-const defaultBaseURL = "https://agentsworkhub.com"
-
-type PatrolConfig struct {
+// patrolConfigWire is used only during JSON unmarshal to handle the renamed
+// auto_accept → auto_bid field while keeping backward compatibility with old
+// config files that still use auto_accept.
+type patrolConfigWire struct {
 	Engine           string   `json:"engine"`
 	EnginePath       string   `json:"engine_path"`
 	EngineArgs       []string `json:"engine_args"`
-	AutoAccept       bool     `json:"auto_accept"`
+	AutoBid          *bool    `json:"auto_bid"`
+	AutoAcceptLegacy *bool    `json:"auto_accept"` // deprecated key, migrated on load
 	BidMessage       string   `json:"bid_message"`
 	MaxConcurrent    int      `json:"max_concurrent"`
 	PollIntervalSecs int      `json:"poll_interval_secs"`
 	SkillsFilter     []string `json:"skills_filter"`
 	WorkDir          string   `json:"work_dir"`
 	TaskTimeoutMins  int      `json:"task_timeout_mins"`
+
+	PublisherAutoSelectBid  bool   `json:"publisher_auto_select_bid"`
+	PublisherAutoComplete   bool   `json:"publisher_auto_complete"`
+	PublisherSelectStrategy string `json:"publisher_select_strategy"`
+}
+
+const defaultBaseURL = "https://agentsworkhub.com"
+
+type PatrolConfig struct {
+	Engine           string   `json:"engine"`
+	EnginePath       string   `json:"engine_path"`
+	EngineArgs       []string `json:"engine_args"`
+	AutoBid          bool     `json:"auto_bid"`
+	BidMessage       string   `json:"bid_message"`
+	MaxConcurrent    int      `json:"max_concurrent"`
+	PollIntervalSecs int      `json:"poll_interval_secs"`
+	SkillsFilter     []string `json:"skills_filter"`
+	WorkDir          string   `json:"work_dir"`
+	TaskTimeoutMins  int      `json:"task_timeout_mins"`
+
+	// Publisher role settings
+	PublisherAutoSelectBid  bool   `json:"publisher_auto_select_bid"`
+	PublisherAutoComplete   bool   `json:"publisher_auto_complete"`
+	PublisherSelectStrategy string `json:"publisher_select_strategy"` // "first" (default)
 }
 
 type Config struct {
@@ -34,7 +60,7 @@ func defaultPatrolConfig() PatrolConfig {
 		Engine:           "claude",
 		EnginePath:       "claude",
 		EngineArgs:       []string{},
-		AutoAccept:       true,
+		AutoBid:          true,
 		BidMessage:       "I am an automated agent ready to work on this task.",
 		MaxConcurrent:    1,
 		PollIntervalSecs: 30,
@@ -60,6 +86,14 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
+// configWire mirrors Config but uses patrolConfigWire for backward-compat migration.
+type configWire struct {
+	Name    string           `json:"name"`
+	Token   string           `json:"token"`
+	BaseURL string           `json:"base_url"`
+	Patrol  patrolConfigWire `json:"patrol"`
+}
+
 func Load() (*Config, error) {
 	path, err := configPath()
 	if err != nil {
@@ -67,20 +101,53 @@ func Load() (*Config, error) {
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return &Config{BaseURL: defaultBaseURL}, nil
+		cfg := &Config{BaseURL: defaultBaseURL}
+		applyPatrolDefaults(&cfg.Patrol)
+		return cfg, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	var wire configWire
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return nil, err
 	}
+
+	cfg := &Config{
+		Name:    wire.Name,
+		Token:   wire.Token,
+		BaseURL: wire.BaseURL,
+		Patrol: PatrolConfig{
+			Engine:                  wire.Patrol.Engine,
+			EnginePath:              wire.Patrol.EnginePath,
+			EngineArgs:              wire.Patrol.EngineArgs,
+			BidMessage:              wire.Patrol.BidMessage,
+			MaxConcurrent:           wire.Patrol.MaxConcurrent,
+			PollIntervalSecs:        wire.Patrol.PollIntervalSecs,
+			SkillsFilter:            wire.Patrol.SkillsFilter,
+			WorkDir:                 wire.Patrol.WorkDir,
+			TaskTimeoutMins:         wire.Patrol.TaskTimeoutMins,
+			PublisherAutoSelectBid:  wire.Patrol.PublisherAutoSelectBid,
+			PublisherAutoComplete:   wire.Patrol.PublisherAutoComplete,
+			PublisherSelectStrategy: wire.Patrol.PublisherSelectStrategy,
+		},
+	}
+
+	// Migrate: prefer new auto_bid key, fall back to legacy auto_accept
+	switch {
+	case wire.Patrol.AutoBid != nil:
+		cfg.Patrol.AutoBid = *wire.Patrol.AutoBid
+	case wire.Patrol.AutoAcceptLegacy != nil:
+		cfg.Patrol.AutoBid = *wire.Patrol.AutoAcceptLegacy
+	default:
+		cfg.Patrol.AutoBid = true // default true when key absent entirely
+	}
+
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
 	}
 	applyPatrolDefaults(&cfg.Patrol)
-	return &cfg, nil
+	return cfg, nil
 }
 
 func applyPatrolDefaults(d *PatrolConfig) {
@@ -108,6 +175,9 @@ func applyPatrolDefaults(d *PatrolConfig) {
 	}
 	if d.TaskTimeoutMins == 0 {
 		d.TaskTimeoutMins = def.TaskTimeoutMins
+	}
+	if d.PublisherSelectStrategy == "" {
+		d.PublisherSelectStrategy = "first"
 	}
 }
 

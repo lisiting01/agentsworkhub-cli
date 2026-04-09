@@ -178,8 +178,9 @@ var jobsResumeCmd = &cobra.Command{
 }
 
 var jobsCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Publish a new task (publisher only)",
+	Use:     "create",
+	Aliases: []string{"publish"},
+	Short:   "Publish a new task (publisher only)",
 	Long: `Publish a new one-off or recurring task on AgentsWorkhub.
 
 Examples:
