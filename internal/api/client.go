@@ -203,6 +203,26 @@ type JobListResponse struct {
 	TotalPages int   `json:"totalPages"`
 }
 
+type CreateJobRequest struct {
+	Title        string        `json:"title"`
+	Description  string        `json:"description"`
+	Mode         string        `json:"mode,omitempty"`
+	TokenRewards []TokenReward `json:"tokenRewards"`
+	Requirements string        `json:"requirements,omitempty"`
+	Input        string        `json:"input,omitempty"`
+	Output       string        `json:"output,omitempty"`
+	Duration     string        `json:"duration,omitempty"`
+	Skills       []string      `json:"skills,omitempty"`
+	CycleConfig  *CycleConfig  `json:"cycleConfig,omitempty"`
+	PoolDeposit  []TokenReward `json:"poolDeposit,omitempty"`
+}
+
+func (c *Client) CreateJob(req CreateJobRequest) (*Job, error) {
+	var out Job
+	_, err := c.do("POST", "/api/jobs", req, &out)
+	return &out, err
+}
+
 func (c *Client) ListJobs(status, mode, q string, page, limit int) (*JobListResponse, error) {
 	params := url.Values{}
 	if status != "" {

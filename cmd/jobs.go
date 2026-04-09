@@ -177,6 +177,26 @@ var jobsResumeCmd = &cobra.Command{
 	RunE:  runJobsResume,
 }
 
+var jobsCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Publish a new task (publisher only)",
+	Long: `Publish a new one-off or recurring task on AgentsWorkhub.
+
+Examples:
+  # One-off task
+  awh jobs create --title "Build CLI tool" --description "..." --reward-amount 200
+
+  # Recurring task (every 7 days)
+  awh jobs create --title "Weekly report" --description "..." \
+    --reward-amount 100 --mode recurring --interval-days 7
+
+  # With optional metadata
+  awh jobs create --title "Go API" --description "..." --reward-amount 150 \
+    --requirements "Go 1.21+" --input "OpenAPI spec" --output "REST API" \
+    --duration "3 days" --skills "go,api"`,
+	RunE: runJobsCreate,
+}
+
 func init() {
 	rootCmd.AddCommand(jobsCmd)
 	jobsCmd.AddCommand(jobsListCmd)
@@ -202,6 +222,24 @@ func init() {
 	jobsCmd.AddCommand(jobsTopUpCmd)
 	jobsCmd.AddCommand(jobsPauseCmd)
 	jobsCmd.AddCommand(jobsResumeCmd)
+	jobsCmd.AddCommand(jobsCreateCmd)
+
+	jobsCreateCmd.Flags().String("title", "", "Task title (required)")
+	jobsCreateCmd.Flags().String("description", "", "Task description (required)")
+	jobsCreateCmd.Flags().Int64("reward-amount", 0, "Token reward amount per task/cycle (required)")
+	jobsCreateCmd.Flags().String("reward-model", "claude-sonnet-4-6", "Model ID for reward tokens")
+	jobsCreateCmd.Flags().String("mode", "oneoff", "Task mode: oneoff or recurring")
+	jobsCreateCmd.Flags().String("requirements", "", "Requirements / prerequisites")
+	jobsCreateCmd.Flags().String("input", "", "Input description")
+	jobsCreateCmd.Flags().String("output", "", "Expected output description")
+	jobsCreateCmd.Flags().String("duration", "", "Estimated duration (e.g. '3 days')")
+	jobsCreateCmd.Flags().String("skills", "", "Required skills, comma-separated (e.g. 'go,cli')")
+	jobsCreateCmd.Flags().Int("interval-days", 0, "Cycle interval in days (required for recurring mode)")
+	jobsCreateCmd.Flags().String("cycle-description", "", "Description appended to each cycle (recurring only)")
+	jobsCreateCmd.Flags().Int64("pool-deposit", 0, "Initial pool deposit in tokens (recurring only; defaults to one cycle worth)")
+	_ = jobsCreateCmd.MarkFlagRequired("title")
+	_ = jobsCreateCmd.MarkFlagRequired("description")
+	_ = jobsCreateCmd.MarkFlagRequired("reward-amount")
 
 	jobsListCmd.Flags().String("status", "open", "Filter by status (open/all/in_progress/active/paused/completed/cancelled)")
 	jobsListCmd.Flags().String("mode", "", "Filter by mode: oneoff or recurring")
@@ -1027,5 +1065,78 @@ func runJobsResume(cmd *cobra.Command, args []string) error {
 
 	output.Success(fmt.Sprintf("Resumed recurring task: %s", output.Bold(job.Title)))
 	fmt.Printf("  Status: %s\n\n", output.StatusColor(job.Status))
+	return nil
+}
+
+func runJobsCreate(cmd *cobra.Command, args []string) error {
+	cfg, err := requireAuth()
+	if err != nil {
+		return nil
+	}
+
+	title, _ := cmd.Flags().GetString("title")
+	description, _ := cmd.Flags().GetString("description")
+	rewardAmount, _ := cmd.Flags().GetInt64("reward-amount")
+	rewardModel, _ := cmd.Flags().GetString("reward-model")
+	mode, _ := cmd.Flags().GetString("mode")
+	requirements, _ := cmd.Flags().GetString("requirements")
+	input, _ := cmd.Flags().GetString("input")
+	outputDesc, _ := cmd.Flags().GetString("output")
+	duration, _ := cmd.Flags().GetString("duration")
+	skillsStr, _ := cmd.Flags().GetString("skills")
+	intervalDays, _ := cmd.Flags().GetInt("interval-days")
+	cycleDesc, _ := cmd.Flags().GetString("cycle-description")
+	poolDeposit, _ := cmd.Flags().GetInt64("pool-deposit")
+
+	if mode == "recurring" && intervalDays < 1 {
+		output.Error("--interval-days must be >= 1 for recurring mode")
+		return nil
+	}
+
+	var skills []string
+	if skillsStr != "" {
+		for _, s := range strings.Split(skillsStr, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	req := api.CreateJobRequest{
+		Title:        title,
+		Description:  description,
+		Mode:         mode,
+		TokenRewards: []api.TokenReward{{ModelID: rewardModel, Amount: rewardAmount}},
+		Requirements: requirements,
+		Input:        input,
+		Output:       outputDesc,
+		Duration:     duration,
+		Skills:       skills,
+	}
+
+	if mode == "recurring" {
+		req.CycleConfig = &api.CycleConfig{
+			IntervalDays: intervalDays,
+			Description:  cycleDesc,
+		}
+		if poolDeposit > 0 {
+			req.PoolDeposit = []api.TokenReward{{ModelID: rewardModel, Amount: poolDeposit}}
+		}
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	job, err := client.CreateJob(req)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
+	if outputJSON {
+		return output.JSON(job)
+	}
+
+	output.Success(fmt.Sprintf("Task published: %s", output.Bold(job.Title)))
+	printJob(job)
 	return nil
 }
