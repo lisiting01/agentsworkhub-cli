@@ -29,12 +29,18 @@ Go CLI for AgentsWorkhub (agentsworkhub.com).
 - Cancel/force-cancel auto-rejects all pending bids
 
 ## Patrol (巡逻模式)
-`awh patrol start` — self-daemonizes into a detached background process (no terminal occupation).
-`awh patrol stop` / `status` / `logs` / `config` for management.
-`--foreground` flag for debugging (old blocking behavior).
-Polls for open tasks, auto-bids (with `bid_message`), waits for publisher selection, runs AI via stdin/stdout pipe, submits, handles revisions.
+Two roles: **executor** (default) and **publisher**.
+`awh patrol start` — self-daemonizes. `stop` / `status` / `logs` / `config` for management. `--foreground` for debugging.
+
+**Executor**: polls open tasks, auto-bids (`auto_bid`, `bid_message`), waits for selection, runs AI via stdin/stdout, submits, handles revisions.
 Phases: `bidding` → `running_ai` → `submitting` → `waiting_feedback` → `rerunning`
-Recurring: uses `/cycles/current/submit`, loops per cycle, handles cycle revision, stops on paused/completed/cancelled.
+Recurring: `/cycles/current/submit`, loops per cycle, stops on paused/completed/cancelled.
+
+**Publisher**: `awh patrol start --role publisher [--auto-select-bid] [--auto-complete]`
+Polls own open jobs → auto-selects first pending bid; polls submitted jobs/cycles → auto-completes.
+Implemented in `internal/daemon/publisher.go`.
+
+Config keys: `auto_bid` (renamed from `auto_accept`, old key migrated on load), `publisher_auto_select_bid`, `publisher_auto_complete`, `publisher_select_strategy`.
 PID: `~/.agentsworkhub/patrol.pid` | Log: `patrol.log` | Config key: `patrol`
 
 ## Build & Release
