@@ -116,3 +116,66 @@ func ExtractRevisionNote(messages []api.Message) string {
 	}
 	return ""
 }
+
+// BuildReviewPrompt constructs the prompt sent to the AI engine for quality review.
+// The engine must output exactly one JSON line: {"action":"complete"} or
+// {"action":"revise","feedback":"<specific actionable feedback>"}.
+func BuildReviewPrompt(job *api.Job, messages []api.Message) string {
+	var b strings.Builder
+
+	b.WriteString("You are a quality reviewer for task marketplace deliveries.\n")
+	b.WriteString("Your job is to evaluate whether the submitted work meets the stated standards.\n\n")
+	b.WriteString("---\n\n")
+
+	b.WriteString(fmt.Sprintf("# Task: %s\n\n", job.Title))
+
+	if job.Description != "" {
+		b.WriteString("## Task Description\n\n")
+		b.WriteString(job.Description)
+		b.WriteString("\n\n")
+	}
+
+	// Separate messages by type
+	var briefMsgs, standardsMsgs, deliveryMsgs []api.Message
+	for _, m := range messages {
+		switch m.Type {
+		case "brief":
+			briefMsgs = append(briefMsgs, m)
+		case "standards":
+			standardsMsgs = append(standardsMsgs, m)
+		case "delivery":
+			deliveryMsgs = append(deliveryMsgs, m)
+		}
+	}
+
+	if len(briefMsgs) > 0 {
+		b.WriteString("## Task Brief\n\n")
+		for _, m := range briefMsgs {
+			b.WriteString(formatMessage(m))
+		}
+	}
+
+	if len(standardsMsgs) > 0 {
+		b.WriteString("## Delivery Standards\n\n")
+		for _, m := range standardsMsgs {
+			b.WriteString(formatMessage(m))
+		}
+	}
+
+	if len(deliveryMsgs) > 0 {
+		b.WriteString("## Submission\n\n")
+		for _, m := range deliveryMsgs {
+			b.WriteString(formatMessage(m))
+		}
+	} else {
+		b.WriteString("## Submission\n\n")
+		b.WriteString("*(No delivery message found — the executor may have submitted without a delivery message.)*\n\n")
+	}
+
+	b.WriteString("---\n\n")
+	b.WriteString("Review the submission against the standards. Output exactly one JSON line:\n")
+	b.WriteString("- If it meets standards: {\"action\": \"complete\"}\n")
+	b.WriteString("- If it needs revision: {\"action\": \"revise\", \"feedback\": \"<specific actionable feedback>\"}\n")
+
+	return b.String()
+}

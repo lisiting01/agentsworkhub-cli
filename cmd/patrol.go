@@ -21,7 +21,8 @@ var patrolCmd = &cobra.Command{
 	Long: `Patrol mode watches AgentsWorkhub and acts autonomously in the background.
 
 Executor role (default): polls for open tasks, auto-bids, runs AI engine, submits.
-Publisher role: monitors your published jobs, auto-selects bids, auto-completes submissions.`,
+Publisher role: monitors your published jobs, auto-selects bids, auto-completes submissions.
+Reviewer role: monitors your submitted jobs, runs AI engine to review delivery, completes or requests revision.`,
 }
 
 var patrolStartCmd = &cobra.Command{
@@ -70,7 +71,7 @@ func init() {
 	patrolCmd.AddCommand(patrolConfigCmd)
 	patrolConfigCmd.AddCommand(patrolConfigSetCmd)
 
-	patrolStartCmd.Flags().String("role", "executor", "Patrol role: executor or publisher")
+	patrolStartCmd.Flags().String("role", "executor", "Patrol role: executor, publisher, or reviewer")
 	patrolStartCmd.Flags().String("engine", "", "AI engine: claude, codex, generic (executor only)")
 	patrolStartCmd.Flags().String("engine-path", "", "Path to AI engine binary (executor only)")
 	patrolStartCmd.Flags().Bool("auto-bid", true, "Automatically place a bid on matching tasks (executor only)")
@@ -116,8 +117,8 @@ func runPatrolStart(cmd *cobra.Command, args []string) error {
 	}
 
 	role, _ := cmd.Flags().GetString("role")
-	if role != "executor" && role != "publisher" {
-		output.Error(fmt.Sprintf("Unknown role %q. Use 'executor' or 'publisher'", role))
+	if role != "executor" && role != "publisher" && role != "reviewer" {
+		output.Error(fmt.Sprintf("Unknown role %q. Use 'executor', 'publisher', or 'reviewer'", role))
 		return nil
 	}
 
@@ -212,6 +213,9 @@ func startPatrolBackground(cobraCmd *cobra.Command, st *daemon.State, cfg *confi
 	} else {
 		fmt.Printf("  Engine: %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
 	}
+	if role == "reviewer" && len(cfg.Patrol.SkillsFilter) > 0 {
+		fmt.Printf("  Skills filter: %v\n", cfg.Patrol.SkillsFilter)
+	}
 	fmt.Printf("  Poll:   every %ds\n", cfg.Patrol.PollIntervalSecs)
 	fmt.Printf("  Logs:   %s\n", st.LogPath())
 	fmt.Printf("  Stop:   awh patrol stop\n")
@@ -296,7 +300,9 @@ func runPatrolForeground(cfg *config.Config, st *daemon.State, role string, isDa
 			fmt.Printf("  Strategy:      %s\n", cfg.Patrol.PublisherSelectStrategy)
 		} else {
 			fmt.Printf("  Engine:     %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
-			fmt.Printf("  AutoBid:    %v\n", cfg.Patrol.AutoBid)
+			if role == "executor" {
+				fmt.Printf("  AutoBid:    %v\n", cfg.Patrol.AutoBid)
+			}
 			if len(cfg.Patrol.SkillsFilter) > 0 {
 				fmt.Printf("  Skills filter: %v\n", cfg.Patrol.SkillsFilter)
 			}
@@ -309,6 +315,11 @@ func runPatrolForeground(cfg *config.Config, st *daemon.State, role string, isDa
 	if role == "publisher" {
 		pub := daemon.NewPublisher(cfg, st, logWriter)
 		return pub.Run(context.Background())
+	}
+
+	if role == "reviewer" {
+		rev := daemon.NewReviewer(cfg, st, logWriter)
+		return rev.Run(context.Background())
 	}
 
 	d := daemon.New(cfg, st, logWriter)
