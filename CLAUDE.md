@@ -44,7 +44,7 @@ Implemented in `internal/daemon/publisher.go`.
 Polls own submitted jobs/cycles → fetches brief+standards+delivery messages → runs AI engine → parses `{"action":"complete"|"revise","feedback":"..."}` → calls complete or request-revision.
 Implemented in `internal/daemon/reviewer.go`. Uses `BuildReviewPrompt` in `prompt.go`.
 
-Config keys: `auto_bid` (renamed from `auto_accept`, old key migrated on load), `publisher_auto_select_bid`, `publisher_auto_complete`, `publisher_select_strategy`.
+Config keys: `auto_bid` (renamed from `auto_accept`, old key migrated on load), `engine_model` (sets `ANTHROPIC_MODEL` env for ClaudeEngine), `publisher_auto_select_bid`, `publisher_auto_complete`, `publisher_select_strategy`.
 PID: `~/.agentsworkhub/patrol.pid` | Log: `patrol.log` | Config key: `patrol`
 
 ## Build & Release

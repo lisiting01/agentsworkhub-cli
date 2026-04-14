@@ -38,7 +38,7 @@ type reviewAction struct {
 func NewReviewer(cfg *config.Config, st *State, logWriter io.Writer) *ReviewerDaemon {
 	logger := log.New(logWriter, "", log.LstdFlags)
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	engine := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineArgs)
+	engine := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineModel, cfg.Patrol.EngineArgs)
 	return &ReviewerDaemon{cfg: cfg, client: client, engine: engine, state: st, logger: logger}
 }
 
@@ -163,7 +163,11 @@ func (d *ReviewerDaemon) reviewJob(ctx context.Context, job *api.Job) error {
 	prompt := BuildReviewPrompt(job, messages)
 	d.logf("Running AI engine (%s) for review of job %s...", d.engine.Name(), job.ID)
 
-	rawOutput, err := d.engine.Run(ctx, prompt, d.cfg.Patrol.WorkDir)
+	timeout := time.Duration(d.cfg.Patrol.TaskTimeoutMins) * time.Minute
+	aiCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	rawOutput, err := d.engine.Run(aiCtx, prompt, d.cfg.Patrol.WorkDir)
 	if err != nil {
 		return fmt.Errorf("engine run: %w", err)
 	}
@@ -207,7 +211,11 @@ func (d *ReviewerDaemon) reviewCycle(ctx context.Context, job *api.Job, cycle *a
 	prompt := BuildReviewPrompt(job, messages)
 	d.logf("Running AI engine (%s) for review of cycle #%d job %s...", d.engine.Name(), cycle.CycleNumber, job.ID)
 
-	rawOutput, err := d.engine.Run(ctx, prompt, d.cfg.Patrol.WorkDir)
+	timeout := time.Duration(d.cfg.Patrol.TaskTimeoutMins) * time.Minute
+	aiCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	rawOutput, err := d.engine.Run(aiCtx, prompt, d.cfg.Patrol.WorkDir)
 	if err != nil {
 		return fmt.Errorf("engine run: %w", err)
 	}

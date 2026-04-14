@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -17,10 +19,10 @@ type Engine interface {
 }
 
 // NewEngine creates the appropriate engine based on the configured name.
-func NewEngine(name, path string, extraArgs []string) Engine {
+func NewEngine(name, path, model string, extraArgs []string) Engine {
 	switch strings.ToLower(name) {
 	case "claude", "claude-code":
-		return &ClaudeEngine{path: path, extraArgs: extraArgs}
+		return &ClaudeEngine{path: path, model: model, extraArgs: extraArgs}
 	case "codex":
 		return &CodexEngine{path: path, extraArgs: extraArgs}
 	default:
@@ -29,20 +31,29 @@ func NewEngine(name, path string, extraArgs []string) Engine {
 }
 
 // --- Claude Code Engine ---
-// Claude Code outputs JSONL. The final result is in:
-//   {"type":"result","subtype":"success","result":"<text>"}
-// Large prompts are sent via stdin, not -p args (avoids Windows cmd length limit).
+// Claude Code outputs stream-json JSONL. The final result is in:
+//
+//	{"type":"result","subtype":"success","result":"<text>"}
+//
+// Prompts are piped via stdin (no -p flag) to avoid Windows cmd length limits.
+// Claude Code auto-detects non-TTY stdin and enters non-interactive mode.
 
 type ClaudeEngine struct {
 	path      string
+	model     string
 	extraArgs []string
 }
 
 func (e *ClaudeEngine) Name() string { return "claude" }
 
 func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
-	args := append([]string{"--output-format", "json", "--print"}, e.extraArgs...)
+	args := []string{"--output-format", "stream-json", "--dangerously-skip-permissions"}
+	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
+
+	if e.model != "" {
+		cmd.Env = append(os.Environ(), "ANTHROPIC_MODEL="+e.model)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -52,22 +63,36 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 	if err != nil {
 		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = io.Discard
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start claude: %w", err)
 	}
 
-	// Send prompt via stdin, then close to signal EOF
 	if _, err := io.WriteString(stdin, prompt); err != nil {
 		_ = cmd.Process.Kill()
 		return "", fmt.Errorf("write prompt: %w", err)
 	}
 	stdin.Close()
 
-	result, err := parseClaudeOutput(stdout)
-	_ = cmd.Wait()
-	return result, err
+	result, parseErr := parseClaudeOutput(stdout)
+	waitErr := cmd.Wait()
+
+	if parseErr != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return "", fmt.Errorf("%w (stderr: %s)", parseErr, stderr)
+		}
+		return "", parseErr
+	}
+	if waitErr != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return result, fmt.Errorf("claude exited with error: %w (stderr: %s)", waitErr, stderr)
+		}
+	}
+	return result, nil
 }
 
 // claudeJSONLine represents the JSONL lines Claude Code emits.
@@ -143,7 +168,8 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 	if err != nil {
 		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = io.Discard
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start codex: %w", err)
@@ -158,6 +184,10 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 	result := parseCodexOutput(stdout)
 	_ = cmd.Wait()
 	if result == "" {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return "", fmt.Errorf("no result from codex (stderr: %s)", stderr)
+		}
 		return "", fmt.Errorf("no result from codex")
 	}
 	return result, nil
@@ -212,7 +242,8 @@ func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) 
 	if err != nil {
 		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = io.Discard
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start engine %s: %w", e.path, err)
@@ -231,6 +262,10 @@ func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) 
 	}
 	result := strings.TrimSpace(string(out))
 	if result == "" {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return "", fmt.Errorf("engine returned empty output (stderr: %s)", stderr)
+		}
 		return "", fmt.Errorf("engine returned empty output")
 	}
 	return result, nil

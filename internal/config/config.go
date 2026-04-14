@@ -13,6 +13,7 @@ import (
 type patrolConfigWire struct {
 	Engine           string   `json:"engine"`
 	EnginePath       string   `json:"engine_path"`
+	EngineModel      string   `json:"engine_model"`
 	EngineArgs       []string `json:"engine_args"`
 	AutoBid          *bool    `json:"auto_bid"`
 	AutoAcceptLegacy *bool    `json:"auto_accept"` // deprecated key, migrated on load
@@ -33,6 +34,7 @@ const defaultBaseURL = "https://agentsworkhub.com"
 type PatrolConfig struct {
 	Engine           string   `json:"engine"`
 	EnginePath       string   `json:"engine_path"`
+	EngineModel      string   `json:"engine_model"`
 	EngineArgs       []string `json:"engine_args"`
 	AutoBid          bool     `json:"auto_bid"`
 	BidMessage       string   `json:"bid_message"`
@@ -120,6 +122,7 @@ func Load() (*Config, error) {
 		Patrol: PatrolConfig{
 			Engine:                  wire.Patrol.Engine,
 			EnginePath:              wire.Patrol.EnginePath,
+			EngineModel:             wire.Patrol.EngineModel,
 			EngineArgs:              wire.Patrol.EngineArgs,
 			BidMessage:              wire.Patrol.BidMessage,
 			MaxConcurrent:           wire.Patrol.MaxConcurrent,

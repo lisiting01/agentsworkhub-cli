@@ -27,7 +27,7 @@ type Daemon struct {
 // New creates a Daemon from the given config and state.
 func New(cfg *config.Config, st *State, logWriter io.Writer) *Daemon {
 	logger := log.New(logWriter, "", log.LstdFlags)
-	eng := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineArgs)
+	eng := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineModel, cfg.Patrol.EngineArgs)
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	return &Daemon{cfg: cfg, client: client, engine: eng, state: st, logger: logger}
 }

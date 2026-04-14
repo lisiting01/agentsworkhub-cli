@@ -72,8 +72,9 @@ func init() {
 	patrolConfigCmd.AddCommand(patrolConfigSetCmd)
 
 	patrolStartCmd.Flags().String("role", "executor", "Patrol role: executor, publisher, or reviewer")
-	patrolStartCmd.Flags().String("engine", "", "AI engine: claude, codex, generic (executor only)")
-	patrolStartCmd.Flags().String("engine-path", "", "Path to AI engine binary (executor only)")
+	patrolStartCmd.Flags().String("engine", "", "AI engine: claude, codex, generic")
+	patrolStartCmd.Flags().String("engine-path", "", "Path to AI engine binary")
+	patrolStartCmd.Flags().String("engine-model", "", "AI model name (e.g. claude-sonnet-4-20250514)")
 	patrolStartCmd.Flags().Bool("auto-bid", true, "Automatically place a bid on matching tasks (executor only)")
 	patrolStartCmd.Flags().Int("poll", 0, "Poll interval in seconds (overrides config)")
 	patrolStartCmd.Flags().StringSlice("skills", nil, "Only accept tasks with these skills (executor only, comma-separated)")
@@ -127,6 +128,9 @@ func runPatrolStart(cmd *cobra.Command, args []string) error {
 	}
 	if v, _ := cmd.Flags().GetString("engine-path"); v != "" {
 		cfg.Patrol.EnginePath = v
+	}
+	if v, _ := cmd.Flags().GetString("engine-model"); v != "" {
+		cfg.Patrol.EngineModel = v
 	}
 	if cmd.Flags().Changed("auto-bid") {
 		v, _ := cmd.Flags().GetBool("auto-bid")
@@ -212,6 +216,9 @@ func startPatrolBackground(cobraCmd *cobra.Command, st *daemon.State, cfg *confi
 		fmt.Printf("  AutoComplete:  %v\n", cfg.Patrol.PublisherAutoComplete)
 	} else {
 		fmt.Printf("  Engine: %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
+		if cfg.Patrol.EngineModel != "" {
+			fmt.Printf("  Model:  %s\n", cfg.Patrol.EngineModel)
+		}
 	}
 	if role == "reviewer" && len(cfg.Patrol.SkillsFilter) > 0 {
 		fmt.Printf("  Skills filter: %v\n", cfg.Patrol.SkillsFilter)
@@ -235,6 +242,9 @@ func buildChildArgs(cobraCmd *cobra.Command) []string {
 	}
 	if v, _ := cobraCmd.Flags().GetString("engine-path"); v != "" {
 		args = append(args, "--engine-path", v)
+	}
+	if v, _ := cobraCmd.Flags().GetString("engine-model"); v != "" {
+		args = append(args, "--engine-model", v)
 	}
 	if cobraCmd.Flags().Changed("auto-bid") {
 		v, _ := cobraCmd.Flags().GetBool("auto-bid")
@@ -300,6 +310,9 @@ func runPatrolForeground(cfg *config.Config, st *daemon.State, role string, isDa
 			fmt.Printf("  Strategy:      %s\n", cfg.Patrol.PublisherSelectStrategy)
 		} else {
 			fmt.Printf("  Engine:     %s (%s)\n", output.Bold(cfg.Patrol.Engine), cfg.Patrol.EnginePath)
+			if cfg.Patrol.EngineModel != "" {
+				fmt.Printf("  Model:      %s\n", cfg.Patrol.EngineModel)
+			}
 			if role == "executor" {
 				fmt.Printf("  AutoBid:    %v\n", cfg.Patrol.AutoBid)
 			}
@@ -502,6 +515,8 @@ func applyPatrolConfigKey(d *config.PatrolConfig, key, val string) error {
 		d.Engine = val
 	case "engine_path":
 		d.EnginePath = val
+	case "engine_model":
+		d.EngineModel = val
 	case "auto_bid":
 		d.AutoBid = val == "true" || val == "1"
 	case "auto_accept": // deprecated alias for auto_bid
