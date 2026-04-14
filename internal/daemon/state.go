@@ -22,16 +22,50 @@ type TaskStatus struct {
 }
 
 // State manages pid file, log file, and current task file under configDir.
+// Each patrol role has its own PID file so multiple roles can run concurrently.
 type State struct {
-	dir string
+	dir  string
+	role string // "executor", "publisher", "reviewer", or "" (treated as executor)
 }
 
 func NewState(configDir string) *State {
-	return &State{dir: configDir}
+	return &State{dir: configDir, role: "executor"}
 }
 
-func (s *State) pidPath() string  { return filepath.Join(s.dir, "patrol.pid") }
-func (s *State) logPath() string  { return filepath.Join(s.dir, "patrol.log") }
+func NewStateForRole(configDir, role string) *State {
+	return &State{dir: configDir, role: role}
+}
+
+// AllRoleStates returns State instances for every known patrol role.
+// Used by stop/status to inspect all roles at once.
+func AllRoleStates(configDir string) []*State {
+	return []*State{
+		{dir: configDir, role: "executor"},
+		{dir: configDir, role: "publisher"},
+		{dir: configDir, role: "reviewer"},
+	}
+}
+
+func (s *State) Role() string {
+	if s.role == "" {
+		return "executor"
+	}
+	return s.role
+}
+
+// pidPath returns the role-specific PID file path.
+// executor uses patrol.pid for backward compatibility; others use patrol.<role>.pid.
+func (s *State) pidPath() string {
+	role := s.Role()
+	if role == "executor" {
+		return filepath.Join(s.dir, "patrol.pid")
+	}
+	return filepath.Join(s.dir, "patrol."+role+".pid")
+}
+
+// logPath is shared across all roles.
+func (s *State) logPath() string { return filepath.Join(s.dir, "patrol.log") }
+
 func (s *State) taskPath() string { return filepath.Join(s.dir, "patrol.task.json") }
 
 // --- PID ---
@@ -95,7 +129,7 @@ func (s *State) OpenLog() (io.WriteCloser, error) {
 // LogPath returns the absolute path to the log file.
 func (s *State) LogPath() string { return s.logPath() }
 
-// --- Current task ---
+// --- Current task (executor only) ---
 
 func (s *State) WriteTask(t *TaskStatus) error {
 	t.UpdatedAt = time.Now()

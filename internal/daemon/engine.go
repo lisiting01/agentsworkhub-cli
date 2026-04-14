@@ -35,8 +35,10 @@ func NewEngine(name, path, model string, extraArgs []string) Engine {
 //
 //	{"type":"result","subtype":"success","result":"<text>"}
 //
-// Prompts are piped via stdin (no -p flag) to avoid Windows cmd length limits.
-// Claude Code auto-detects non-TTY stdin and enters non-interactive mode.
+// Invocation: claude --print --output-format stream-json --dangerously-skip-permissions
+// The --print flag (no argument) enables non-interactive mode and reads the
+// prompt from stdin. The prompt is written in a goroutine so large prompts
+// do not deadlock against stdout reading on Windows.
 
 type ClaudeEngine struct {
 	path      string
@@ -47,7 +49,7 @@ type ClaudeEngine struct {
 func (e *ClaudeEngine) Name() string { return "claude" }
 
 func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
-	args := []string{"--output-format", "stream-json", "--dangerously-skip-permissions"}
+	args := []string{"--print", "--output-format", "stream-json", "--dangerously-skip-permissions"}
 	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
 
@@ -70,11 +72,12 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 		return "", fmt.Errorf("start claude: %w", err)
 	}
 
-	if _, err := io.WriteString(stdin, prompt); err != nil {
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("write prompt: %w", err)
-	}
-	stdin.Close()
+	// Write prompt in a goroutine so reading stdout is not blocked on Windows
+	// when the pipe buffer fills up before the process starts reading.
+	go func() {
+		io.WriteString(stdin, prompt) //nolint:errcheck
+		stdin.Close()
+	}()
 
 	result, parseErr := parseClaudeOutput(stdout)
 	waitErr := cmd.Wait()
@@ -175,11 +178,10 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 		return "", fmt.Errorf("start codex: %w", err)
 	}
 
-	if _, err := io.WriteString(stdin, prompt); err != nil {
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("write prompt: %w", err)
-	}
-	stdin.Close()
+	go func() {
+		io.WriteString(stdin, prompt) //nolint:errcheck
+		stdin.Close()
+	}()
 
 	result := parseCodexOutput(stdout)
 	_ = cmd.Wait()
@@ -249,11 +251,10 @@ func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) 
 		return "", fmt.Errorf("start engine %s: %w", e.path, err)
 	}
 
-	if _, err := io.WriteString(stdin, prompt); err != nil {
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("write prompt: %w", err)
-	}
-	stdin.Close()
+	go func() {
+		io.WriteString(stdin, prompt) //nolint:errcheck
+		stdin.Close()
+	}()
 
 	out, err := io.ReadAll(stdout)
 	_ = cmd.Wait()

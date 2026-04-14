@@ -86,29 +86,47 @@ func init() {
 	patrolStartCmd.Flags().Bool("auto-select-bid", false, "Auto-select first bid on your open jobs (publisher only)")
 	patrolStartCmd.Flags().Bool("auto-complete", false, "Auto-complete submitted jobs (publisher only)")
 
+	// Stop/status support per-role targeting
+	patrolStopCmd.Flags().String("role", "", "Role to stop: executor, publisher, reviewer (default: all)")
+
 	patrolLogsCmd.Flags().BoolP("follow", "f", false, "Follow the log (tail -f style)")
 	patrolLogsCmd.Flags().Int("lines", 50, "Number of lines to show")
 }
 
-func loadStateAndConfig() (*config.Config, *daemon.State, error) {
+func patrolConfigDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return home + "/.agentsworkhub", nil
+}
+
+func loadConfig() (*config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if baseURLOverride != "" {
 		cfg.BaseURL = baseURLOverride
 	}
-	home, err := os.UserHomeDir()
+	return cfg, nil
+}
+
+func loadStateAndConfig() (*config.Config, *daemon.State, error) {
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, nil, err
 	}
-	configDir := home + "/.agentsworkhub"
-	st := daemon.NewState(configDir)
+	dir, err := patrolConfigDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	st := daemon.NewStateForRole(dir, "executor")
 	return cfg, st, nil
 }
 
 func runPatrolStart(cmd *cobra.Command, args []string) error {
-	cfg, st, err := loadStateAndConfig()
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -151,9 +169,16 @@ func runPatrolStart(cmd *cobra.Command, args []string) error {
 		cfg.Patrol.PublisherAutoComplete = v
 	}
 
+	dir, err := patrolConfigDir()
+	if err != nil {
+		return err
+	}
+	// Each role has its own PID file so roles can run concurrently.
+	st := daemon.NewStateForRole(dir, role)
+
 	running, pid, _ := st.IsRunning()
 	if running {
-		output.Warn(fmt.Sprintf("Patrol already running (PID %d). Stop it first with: awh patrol stop", pid))
+		output.Warn(fmt.Sprintf("Patrol [%s] already running (PID %d). Stop it with: awh patrol stop --role %s", role, pid, role))
 		return nil
 	}
 
@@ -340,77 +365,110 @@ func runPatrolForeground(cfg *config.Config, st *daemon.State, role string, isDa
 }
 
 func runPatrolStop(cmd *cobra.Command, args []string) error {
-	_, st, err := loadStateAndConfig()
+	dir, err := patrolConfigDir()
 	if err != nil {
 		return err
 	}
 
-	running, pid, err := st.IsRunning()
-	if err != nil {
-		return err
-	}
-	if !running {
-		output.Warn("Patrol is not running")
-		return nil
+	roleFlag, _ := cmd.Flags().GetString("role")
+
+	var states []*daemon.State
+	if roleFlag != "" {
+		states = []*daemon.State{daemon.NewStateForRole(dir, roleFlag)}
+	} else {
+		states = daemon.AllRoleStates(dir)
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("find process: %w", err)
+	stopped := 0
+	for _, st := range states {
+		running, pid, err := st.IsRunning()
+		if err != nil {
+			output.Warn(fmt.Sprintf("[%s] error reading PID: %v", st.Role(), err))
+			continue
+		}
+		if !running {
+			if roleFlag != "" {
+				output.Warn(fmt.Sprintf("Patrol [%s] is not running", st.Role()))
+			}
+			if pid != 0 {
+				_ = st.ClearPID()
+			}
+			continue
+		}
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			output.Warn(fmt.Sprintf("[%s] find process %d: %v", st.Role(), pid, err))
+			continue
+		}
+		if err := terminateProcess(proc); err != nil {
+			output.Warn(fmt.Sprintf("[%s] terminate PID %d: %v", st.Role(), pid, err))
+			continue
+		}
+		_ = st.ClearPID()
+		output.Success(fmt.Sprintf("Patrol [%s] stopped (PID %d)", st.Role(), pid))
+		stopped++
 	}
-	if err := terminateProcess(proc); err != nil {
-		return fmt.Errorf("terminate: %w", err)
+
+	if stopped == 0 && roleFlag == "" {
+		output.Warn("No patrol processes were running")
 	}
-	_ = st.ClearPID()
-	output.Success(fmt.Sprintf("Patrol stopped (PID %d)", pid))
 	return nil
 }
 
 func runPatrolStatus(cmd *cobra.Command, args []string) error {
-	_, st, err := loadStateAndConfig()
+	dir, err := patrolConfigDir()
 	if err != nil {
 		return err
 	}
 
-	running, pid, err := st.IsRunning()
-	if err != nil {
-		return err
-	}
+	states := daemon.AllRoleStates(dir)
 
 	if outputJSON {
-		task, _ := st.ReadTask()
-		return output.JSON(map[string]any{
-			"running": running,
-			"pid":     pid,
-			"task":    task,
-		})
-	}
-
-	if !running {
-		fmt.Println(output.Yellow("Patrol: not running"))
-		if pid != 0 {
-			fmt.Printf("  (stale PID file: %d)\n", pid)
-			_ = st.ClearPID()
+		type roleStatus struct {
+			Role    string            `json:"role"`
+			Running bool              `json:"running"`
+			PID     int               `json:"pid"`
+			Task    *daemon.TaskStatus `json:"task,omitempty"`
 		}
-		return nil
+		var result []roleStatus
+		for _, st := range states {
+			running, pid, _ := st.IsRunning()
+			var task *daemon.TaskStatus
+			if st.Role() == "executor" {
+				task, _ = st.ReadTask()
+			}
+			result = append(result, roleStatus{Role: st.Role(), Running: running, PID: pid, Task: task})
+		}
+		return output.JSON(result)
 	}
 
-	fmt.Printf("Patrol: %s  (PID %d)\n", output.Green("running"), pid)
+	anyRunning := false
+	for _, st := range states {
+		running, pid, _ := st.IsRunning()
+		if !running {
+			if pid != 0 {
+				_ = st.ClearPID()
+			}
+			fmt.Printf("  [%s] %s\n", st.Role(), output.Yellow("not running"))
+			continue
+		}
+		anyRunning = true
+		fmt.Printf("  [%s] %s  (PID %d)\n", st.Role(), output.Green("running"), pid)
 
-	task, err := st.ReadTask()
-	if err != nil || task == nil {
-		fmt.Println("  Current task: none (polling)")
-		return nil
+		if st.Role() == "executor" {
+			task, err := st.ReadTask()
+			if err == nil && task != nil {
+				elapsed := time.Since(task.StartedAt).Round(time.Second)
+				fmt.Printf("    Task:    %s\n", output.Bold(task.JobTitle))
+				fmt.Printf("    Job ID:  %s\n", task.JobID)
+				fmt.Printf("    Phase:   %s\n", output.StatusColor(task.Phase))
+				fmt.Printf("    Elapsed: %s\n", elapsed)
+			} else {
+				fmt.Printf("    Task: none (polling)\n")
+			}
+		}
 	}
-
-	elapsed := time.Since(task.StartedAt).Round(time.Second)
-	output.KeyValue([][2]string{
-		{"Current task", output.Bold(task.JobTitle)},
-		{"Job ID", task.JobID},
-		{"Phase", output.StatusColor(task.Phase)},
-		{"Started", task.StartedAt.Format("15:04:05")},
-		{"Elapsed", elapsed.String()},
-	})
+	_ = anyRunning
 	return nil
 }
 
