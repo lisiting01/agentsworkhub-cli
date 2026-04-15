@@ -18,6 +18,14 @@ type Engine interface {
 	Name() string
 }
 
+// StreamingEngine extends Engine with a method that transparently pipes
+// the subprocess stdout to the caller (e.g. os.Stdout) instead of parsing
+// the output into a result string. Used by `awh agent run`.
+type StreamingEngine interface {
+	Engine
+	RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error)
+}
+
 // NewEngine creates the appropriate engine based on the configured name.
 func NewEngine(name, path, model string, extraArgs []string) Engine {
 	switch strings.ToLower(name) {
@@ -96,6 +104,37 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 		}
 	}
 	return result, nil
+}
+
+// RunStreaming spawns Claude Code and pipes its stream-json output directly to
+// out (typically os.Stdout). Returns the running Cmd so the caller can manage
+// the process lifecycle. The caller should call cmd.Wait() when done.
+func (e *ClaudeEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
+	args := []string{"--print", "--output-format", "stream-json", "--dangerously-skip-permissions"}
+	args = append(args, e.extraArgs...)
+	cmd := newCmd(ctx, e.path, args, workDir)
+
+	if e.model != "" {
+		cmd.Env = append(os.Environ(), "ANTHROPIC_MODEL="+e.model)
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	go func() {
+		io.WriteString(stdin, prompt) //nolint:errcheck
+		stdin.Close()
+	}()
+
+	return cmd, nil
 }
 
 // claudeJSONLine represents the JSONL lines Claude Code emits.
@@ -193,6 +232,30 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 		return "", fmt.Errorf("no result from codex")
 	}
 	return result, nil
+}
+
+// RunStreaming spawns Codex CLI and pipes its output directly to out.
+func (e *CodexEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
+	args := append([]string{"--quiet"}, e.extraArgs...)
+	cmd := newCmd(ctx, e.path, args, workDir)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start codex: %w", err)
+	}
+
+	go func() {
+		io.WriteString(stdin, prompt) //nolint:errcheck
+		stdin.Close()
+	}()
+
+	return cmd, nil
 }
 
 type codexJSONLine struct {
