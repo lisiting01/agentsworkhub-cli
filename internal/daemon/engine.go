@@ -57,13 +57,18 @@ type ClaudeEngine struct {
 func (e *ClaudeEngine) Name() string { return "claude" }
 
 func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
-	args := []string{"--print", "--output-format", "stream-json", "--dangerously-skip-permissions"}
+	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
 
+	env := os.Environ()
 	if e.model != "" {
-		cmd.Env = append(os.Environ(), "ANTHROPIC_MODEL="+e.model)
+		env = append(env, "ANTHROPIC_MODEL="+e.model)
 	}
+	if gitBash := resolveGitBashPath(); gitBash != "" {
+		env = append(env, "CLAUDE_CODE_GIT_BASH_PATH="+gitBash)
+	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -110,13 +115,18 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 // out (typically os.Stdout). Returns the running Cmd so the caller can manage
 // the process lifecycle. The caller should call cmd.Wait() when done.
 func (e *ClaudeEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
-	args := []string{"--print", "--output-format", "stream-json", "--dangerously-skip-permissions"}
+	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
 
+	env := os.Environ()
 	if e.model != "" {
-		cmd.Env = append(os.Environ(), "ANTHROPIC_MODEL="+e.model)
+		env = append(env, "ANTHROPIC_MODEL="+e.model)
 	}
+	if gitBash := resolveGitBashPath(); gitBash != "" {
+		env = append(env, "CLAUDE_CODE_GIT_BASH_PATH="+gitBash)
+	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
