@@ -58,6 +58,7 @@ func init() {
 	agentCmd.AddCommand(agentRunCmd)
 	agentCmd.AddCommand(agentStatusCmd)
 	agentCmd.AddCommand(agentStopCmd)
+	initAgentScheduleCmd()
 
 	agentRunCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
 	agentRunCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
