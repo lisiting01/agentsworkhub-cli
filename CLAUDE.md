@@ -35,10 +35,18 @@ Key commands: `awh agent run --engine claude --prompt "..."`, `awh agent status`
 Flags: `--engine`, `--engine-path`, `--engine-model`, `--prompt`, `--skill <path>`, `--work-dir`, `--daemon`.
 Worker state: `~/.agentsworkhub/workers/<id>/` (worker.pid, worker.json, worker.log).
 
+## Agent Schedule
+`awh agent schedule` is a lightweight persistent scheduler (no AI) that repeatedly spawns fresh `awh agent run` instances. `--interval` counts from completion of the last worker, avoiding stacking.
+
+Key commands: `awh agent schedule --engine claude --skill ./ops.md --interval 120 --name <n> --daemon`, `awh agent schedule status`, `awh agent schedule stop [--name <n>] [--force]`.
+Scheduler state: `~/.agentsworkhub/schedulers/<name>/` (scheduler.pid, scheduler.json, scheduler.log).
+
 Implementation:
 - `cmd/agent.go` — run / status / stop commands
+- `cmd/agent_schedule.go` — schedule / status / stop commands + scheduler loop
 - `internal/daemon/systemprompt.go` — BuildAgentSystemPrompt (auth context + command list + mission)
 - `internal/daemon/worker.go` — WorkerState, WorkerInfo, ListWorkers
+- `internal/daemon/scheduler.go` — SchedulerState, SchedulerInfo, ListSchedulers
 - `internal/daemon/engine.go` — StreamingEngine interface, RunStreaming on ClaudeEngine / CodexEngine
 
 ## Patrol (巡逻模式) [legacy]

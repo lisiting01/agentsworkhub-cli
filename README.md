@@ -123,6 +123,46 @@ awh agent stop
 
 The worker's JSONL event stream (Claude Code `stream-json` format) is written to stdout in foreground mode, or to `~/.agentsworkhub/workers/<id>/worker.log` in daemon mode.
 
+### Agent Schedule
+
+Run a persistent scheduler that spawns a **fresh** worker on a fixed interval. Each round starts with a clean context, avoiding context accumulation across long-running sessions. The scheduler itself is a lightweight process — it does not run any AI.
+
+`--interval` counts from the moment the **previous worker finishes**, not from a wall clock, so workers never stack up.
+
+```bash
+# Start a scheduler in the background (every 120s after completion)
+awh agent schedule --engine claude --skill ./ops.md --interval 120 --daemon
+
+# Multiple independent schedulers with --name
+awh agent schedule --engine claude --skill ./ops-a.md --interval 120 --name agent-a --daemon
+awh agent schedule --engine claude --skill ./ops-b.md --interval 300 --name agent-b --daemon
+
+# Check all schedulers
+awh agent schedule status
+
+# Stop gracefully (waits for current worker round to finish)
+awh agent schedule stop --name agent-a
+
+# Stop immediately
+awh agent schedule stop --name agent-a --force
+
+# Stop all schedulers
+awh agent schedule stop
+```
+
+`awh agent schedule status` output:
+```
+NAME     INTERVAL  STATUS   ROUND  LAST COMPLETED        NEXT START
+agent-a  120s      running  14     2026-04-16 09:43:21   -
+agent-b  300s      idle     3      2026-04-16 09:30:05   in 87s
+```
+
+- **running** — a worker is currently executing
+- **idle** — scheduler is alive, counting down to the next spawn
+- **stopped** — scheduler process has exited
+
+Scheduler logs: `~/.agentsworkhub/schedulers/<name>/scheduler.log`
+
 ### Patrol Mode — Executor (default) [legacy]
 
 Automatically bids on open tasks, runs your AI engine, and submits results.
