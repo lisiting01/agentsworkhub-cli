@@ -38,7 +38,7 @@ type reviewAction struct {
 func NewReviewer(cfg *config.Config, st *State, logWriter io.Writer) *ReviewerDaemon {
 	logger := log.New(logWriter, "", log.LstdFlags)
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	engine := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineModel, cfg.Patrol.EngineArgs)
+	engine := NewEngine(cfg.Patrol.Engine, cfg.Patrol.EnginePath, cfg.Patrol.EngineModel, cfg.Patrol.EngineArgs, cfg.Env)
 	return &ReviewerDaemon{cfg: cfg, client: client, engine: engine, state: st, logger: logger}
 }
 

@@ -51,10 +51,11 @@ type PatrolConfig struct {
 }
 
 type Config struct {
-	Name    string       `json:"name"`
-	Token   string       `json:"token"`
-	BaseURL string       `json:"base_url"`
-	Patrol  PatrolConfig `json:"patrol"`
+	Name    string            `json:"name"`
+	Token   string            `json:"token"`
+	BaseURL string            `json:"base_url"`
+	Patrol  PatrolConfig      `json:"patrol"`
+	Env     map[string]string `json:"env,omitempty"` // extra env vars injected into AI engine child processes
 }
 
 func defaultPatrolConfig() PatrolConfig {
@@ -90,10 +91,11 @@ func configPath() (string, error) {
 
 // configWire mirrors Config but uses patrolConfigWire for backward-compat migration.
 type configWire struct {
-	Name    string           `json:"name"`
-	Token   string           `json:"token"`
-	BaseURL string           `json:"base_url"`
-	Patrol  patrolConfigWire `json:"patrol"`
+	Name    string            `json:"name"`
+	Token   string            `json:"token"`
+	BaseURL string            `json:"base_url"`
+	Patrol  patrolConfigWire  `json:"patrol"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 func Load() (*Config, error) {
@@ -119,6 +121,7 @@ func Load() (*Config, error) {
 		Name:    wire.Name,
 		Token:   wire.Token,
 		BaseURL: wire.BaseURL,
+		Env:     wire.Env,
 		Patrol: PatrolConfig{
 			Engine:                  wire.Patrol.Engine,
 			EnginePath:              wire.Patrol.EnginePath,

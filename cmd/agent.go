@@ -113,7 +113,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 
 	systemPrompt := daemon.BuildAgentSystemPrompt(cfg.Name, cfg.BaseURL, prompt, skillContent)
 
-	eng := daemon.NewEngine(engineName, enginePath, engineModel, nil)
+	eng := daemon.NewEngine(engineName, enginePath, engineModel, nil, cfg.Env)
 	streamEng, ok := eng.(daemon.StreamingEngine)
 	if !ok {
 		output.Error(fmt.Sprintf("Engine %q does not support streaming mode", engineName))

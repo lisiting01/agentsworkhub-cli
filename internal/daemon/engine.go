@@ -27,15 +27,49 @@ type StreamingEngine interface {
 }
 
 // NewEngine creates the appropriate engine based on the configured name.
-func NewEngine(name, path, model string, extraArgs []string) Engine {
+// extraEnv is an optional map of KEY→VALUE pairs injected into the child
+// process environment on top of the current process's environment; config
+// values take highest priority and can override OS-level env vars.
+func NewEngine(name, path, model string, extraArgs []string, extraEnv map[string]string) Engine {
 	switch strings.ToLower(name) {
 	case "claude", "claude-code":
-		return &ClaudeEngine{path: path, model: model, extraArgs: extraArgs}
+		return &ClaudeEngine{path: path, model: model, extraArgs: extraArgs, extraEnv: extraEnv}
 	case "codex":
-		return &CodexEngine{path: path, extraArgs: extraArgs}
+		return &CodexEngine{path: path, extraArgs: extraArgs, extraEnv: extraEnv}
 	default:
-		return &GenericEngine{path: path, extraArgs: extraArgs}
+		return &GenericEngine{path: path, extraArgs: extraArgs, extraEnv: extraEnv}
 	}
+}
+
+// buildEnv constructs a deduplicated environment slice for a child process.
+// Priority (highest last, i.e. last writer wins in the map):
+//  1. Current process environment (os.Environ)
+//  2. Engine-specific vars (model, git-bash path)
+//  3. extraEnv from config — overrides everything above
+func buildEnv(model string, gitBashPath string, extraEnv map[string]string) []string {
+	envMap := make(map[string]string, len(os.Environ())+len(extraEnv)+2)
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			envMap[k] = v
+		}
+	}
+	if model != "" {
+		envMap["ANTHROPIC_MODEL"] = model
+	}
+	if gitBashPath != "" {
+		if _, alreadySet := envMap["CLAUDE_CODE_GIT_BASH_PATH"]; !alreadySet {
+			envMap["CLAUDE_CODE_GIT_BASH_PATH"] = gitBashPath
+		}
+	}
+	// Config env takes highest priority.
+	for k, v := range extraEnv {
+		envMap[k] = v
+	}
+	result := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		result = append(result, k+"="+v)
+	}
+	return result
 }
 
 // --- Claude Code Engine ---
@@ -52,6 +86,7 @@ type ClaudeEngine struct {
 	path      string
 	model     string
 	extraArgs []string
+	extraEnv  map[string]string
 }
 
 func (e *ClaudeEngine) Name() string { return "claude" }
@@ -60,15 +95,7 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
-
-	env := os.Environ()
-	if e.model != "" {
-		env = append(env, "ANTHROPIC_MODEL="+e.model)
-	}
-	if gitBash := resolveGitBashPath(); gitBash != "" {
-		env = append(env, "CLAUDE_CODE_GIT_BASH_PATH="+gitBash)
-	}
-	cmd.Env = env
+	cmd.Env = buildEnv(e.model, resolveGitBashPath(), e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -118,15 +145,7 @@ func (e *ClaudeEngine) RunStreaming(ctx context.Context, prompt string, workDir 
 	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	args = append(args, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
-
-	env := os.Environ()
-	if e.model != "" {
-		env = append(env, "ANTHROPIC_MODEL="+e.model)
-	}
-	if gitBash := resolveGitBashPath(); gitBash != "" {
-		env = append(env, "CLAUDE_CODE_GIT_BASH_PATH="+gitBash)
-	}
-	cmd.Env = env
+	cmd.Env = buildEnv(e.model, resolveGitBashPath(), e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -204,6 +223,7 @@ func parseClaudeOutput(r io.Reader) (string, error) {
 type CodexEngine struct {
 	path      string
 	extraArgs []string
+	extraEnv  map[string]string
 }
 
 func (e *CodexEngine) Name() string { return "codex" }
@@ -211,6 +231,7 @@ func (e *CodexEngine) Name() string { return "codex" }
 func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
 	args := append([]string{"--quiet"}, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
+	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -248,6 +269,7 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 func (e *CodexEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
 	args := append([]string{"--quiet"}, e.extraArgs...)
 	cmd := newCmd(ctx, e.path, args, workDir)
+	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -302,12 +324,14 @@ func parseCodexOutput(r io.Reader) string {
 type GenericEngine struct {
 	path      string
 	extraArgs []string
+	extraEnv  map[string]string
 }
 
 func (e *GenericEngine) Name() string { return e.path }
 
 func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
 	cmd := newCmd(ctx, e.path, e.extraArgs, workDir)
+	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
