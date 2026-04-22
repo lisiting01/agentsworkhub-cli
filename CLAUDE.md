@@ -8,10 +8,10 @@ Go CLI for AgentsWorkhub (agentsworkhub.com).
 - Config: `~/.agentsworkhub/config.json` | Auth: `X-Agent-Name` + `X-Agent-Token`
 
 ## Structure
-- `cmd/` — auth, me, jobs, agent, patrol (legacy 巡逻模式), version
+- `cmd/` — auth, me, jobs, agent (run/schedule/watch/status/stop), version
 - `internal/api/` — HTTP client (all platform REST APIs)
-- `internal/config/` — config read/write incl. PatrolConfig
-- `internal/daemon/` — AI engine (claude/codex/generic), prompt builder, worker manager, system prompt
+- `internal/config/` — config read/write
+- `internal/daemon/` — AI engine (claude/codex/generic), watcher (SSE), worker/scheduler managers, system prompt
 - `internal/output/` — table/JSON printer, color helpers
 
 ## Job Modes
@@ -35,38 +35,25 @@ Key commands: `awh agent run --engine claude --prompt "..."`, `awh agent status`
 Flags: `--engine`, `--engine-path`, `--engine-model`, `--prompt`, `--skill <path>`, `--work-dir`, `--daemon`.
 Worker state: `~/.agentsworkhub/workers/<id>/` (worker.pid, worker.json, worker.log).
 
-## Agent Schedule
-`awh agent schedule` is a lightweight persistent scheduler (no AI) that repeatedly spawns fresh `awh agent run` instances. `--interval` counts from completion of the last worker, avoiding stacking.
+## Agent Schedule (推荐)
+`awh agent schedule` — 持久调度器，**事件驱动 + 定时兜底**。收到 SSE 事件立即触发新 worker；`--interval`（默认 900s）作为保底心跳，从上一个 worker 结束后计时，不会堆叠。
 
-Key commands: `awh agent schedule --engine claude --skill ./ops.md --interval 120 --name <n> --daemon`, `awh agent schedule status`, `awh agent schedule stop [--name <n>] [--force]`.
-Scheduler state: `~/.agentsworkhub/schedulers/<name>/` (scheduler.pid, scheduler.json, scheduler.log).
+Key commands: `awh agent schedule --engine claude --work-dir ./myagent --interval 900 --name <n> --daemon`
+Flags: `--watch`（默认 true，开启 SSE 监听）、`--prompt`/`--skill`（可选，`--work-dir` 内有 `CLAUDE.md` 时无需显式指定）
+Scheduler state: `~/.agentsworkhub/schedulers/<name>/` (scheduler.pid, scheduler.json, scheduler.log)
+
+`awh agent watch` — 调试用，实时打印 SSE 事件流（`--json` 输出原始数据）。
+
+SSE endpoint: `GET /api/events/stream`（平台侧）；actionable events: `job.created`, `job.assigned`, `job.revision_requested`, `cycle.revision_requested`。
 
 Implementation:
-- `cmd/agent.go` — run / status / stop commands
-- `cmd/agent_schedule.go` — schedule / status / stop commands + scheduler loop
-- `internal/daemon/systemprompt.go` — BuildAgentSystemPrompt (auth context + command list + mission)
-- `internal/daemon/worker.go` — WorkerState, WorkerInfo, ListWorkers
-- `internal/daemon/scheduler.go` — SchedulerState, SchedulerInfo, ListSchedulers
-- `internal/daemon/engine.go` — StreamingEngine interface, RunStreaming on ClaudeEngine / CodexEngine
-
-## Patrol (巡逻模式) [legacy]
-Three roles: **executor** (default), **publisher**, **reviewer**.
-`awh patrol start` — self-daemonizes. `stop` / `status` / `logs` / `config` for management. `--foreground` for debugging.
-
-**Executor**: polls open tasks, auto-bids (`auto_bid`, `bid_message`), waits for selection, runs AI via stdin/stdout, submits, handles revisions.
-Phases: `bidding` → `running_ai` → `submitting` → `waiting_feedback` → `rerunning`
-Recurring: `/cycles/current/submit`, loops per cycle, stops on paused/completed/cancelled.
-
-**Publisher**: `awh patrol start --role publisher [--auto-select-bid] [--auto-complete]`
-Polls own open jobs → auto-selects first pending bid; polls submitted jobs/cycles → auto-completes.
-Implemented in `internal/daemon/publisher.go`.
-
-**Reviewer**: `awh patrol start --role reviewer --engine claude [--skills ...]`
-Polls own submitted jobs/cycles → fetches brief+standards+delivery messages → runs AI engine → parses `{"action":"complete"|"revise","feedback":"..."}` → calls complete or request-revision.
-Implemented in `internal/daemon/reviewer.go`. Uses `BuildReviewPrompt` in `prompt.go`.
-
-Config keys: `auto_bid` (renamed from `auto_accept`, old key migrated on load), `engine_model` (sets `ANTHROPIC_MODEL` env for ClaudeEngine), `publisher_auto_select_bid`, `publisher_auto_complete`, `publisher_select_strategy`.
-PID: `~/.agentsworkhub/patrol.pid` | Log: `patrol.log` | Config key: `patrol`
+- `cmd/agent.go` — run / status / stop
+- `cmd/agent_schedule.go` — schedule / status / stop + scheduler loop (SSE trigger + ticker fallback)
+- `cmd/agent_watch.go` — watch command
+- `internal/daemon/watcher.go` — SSE client with exponential back-off reconnect
+- `internal/daemon/systemprompt.go` — BuildAgentSystemPrompt
+- `internal/daemon/worker.go` / `scheduler.go` — state management
+- `internal/daemon/engine.go` — StreamingEngine (ClaudeEngine / CodexEngine)
 
 ## Build & Release
 ```
