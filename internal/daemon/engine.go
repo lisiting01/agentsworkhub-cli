@@ -12,9 +12,20 @@ import (
 	"strings"
 )
 
+// EngineInput is the payload handed to an AI engine. SystemAppendix is appended
+// to the engine's built-in system prompt (e.g. via Claude Code's
+// `--append-system-prompt`). UserMessage is the first user turn, delivered on
+// stdin. WorkDir becomes the child process working directory; on Claude Code
+// this also triggers auto-loading of CLAUDE.md.
+type EngineInput struct {
+	SystemAppendix string
+	UserMessage    string
+	WorkDir        string
+}
+
 // Engine runs an AI tool with a prompt and returns the result text.
 type Engine interface {
-	Run(ctx context.Context, prompt string, workDir string) (string, error)
+	Run(ctx context.Context, in EngineInput) (string, error)
 	Name() string
 }
 
@@ -23,7 +34,7 @@ type Engine interface {
 // the output into a result string. Used by `awh agent run`.
 type StreamingEngine interface {
 	Engine
-	RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error)
+	RunStreaming(ctx context.Context, in EngineInput, out io.Writer) (*exec.Cmd, error)
 }
 
 // NewEngine creates the appropriate engine based on the configured name.
@@ -72,15 +83,39 @@ func buildEnv(model string, gitBashPath string, extraEnv map[string]string) []st
 	return result
 }
 
+// fallbackCombine merges a system appendix and a user message into a single
+// stdin payload for engines that do not support native system prompt injection
+// (Codex, generic). The appendix is clearly delimited so the model can tell
+// context from instruction.
+func fallbackCombine(appendix, userMessage string) string {
+	appendix = strings.TrimSpace(appendix)
+	userMessage = strings.TrimSpace(userMessage)
+	if appendix == "" {
+		return userMessage
+	}
+	if userMessage == "" {
+		return appendix
+	}
+	var b strings.Builder
+	b.WriteString(appendix)
+	b.WriteString("\n\n---\n\n")
+	b.WriteString(userMessage)
+	return b.String()
+}
+
 // --- Claude Code Engine ---
 // Claude Code outputs stream-json JSONL. The final result is in:
 //
 //	{"type":"result","subtype":"success","result":"<text>"}
 //
 // Invocation: claude --print --output-format stream-json --dangerously-skip-permissions
+//   --append-system-prompt "<appendix>"
+//
 // The --print flag (no argument) enables non-interactive mode and reads the
-// prompt from stdin. The prompt is written in a goroutine so large prompts
-// do not deadlock against stdout reading on Windows.
+// user prompt from stdin. The appendix is merged with Claude Code's built-in
+// agent system prompt (and any CLAUDE.md in the work directory). The prompt
+// is written in a goroutine so large prompts do not deadlock against stdout
+// reading on Windows.
 
 type ClaudeEngine struct {
 	path      string
@@ -91,10 +126,17 @@ type ClaudeEngine struct {
 
 func (e *ClaudeEngine) Name() string { return "claude" }
 
-func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
+func (e *ClaudeEngine) buildArgs(appendix string) []string {
 	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
+	if strings.TrimSpace(appendix) != "" {
+		args = append(args, "--append-system-prompt", appendix)
+	}
 	args = append(args, e.extraArgs...)
-	cmd := newCmd(ctx, e.path, args, workDir)
+	return args
+}
+
+func (e *ClaudeEngine) Run(ctx context.Context, in EngineInput) (string, error) {
+	cmd := newCmd(ctx, e.path, e.buildArgs(in.SystemAppendix), in.WorkDir)
 	cmd.Env = buildEnv(e.model, resolveGitBashPath(), e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
@@ -115,7 +157,7 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 	// Write prompt in a goroutine so reading stdout is not blocked on Windows
 	// when the pipe buffer fills up before the process starts reading.
 	go func() {
-		io.WriteString(stdin, prompt) //nolint:errcheck
+		io.WriteString(stdin, in.UserMessage) //nolint:errcheck
 		stdin.Close()
 	}()
 
@@ -141,10 +183,8 @@ func (e *ClaudeEngine) Run(ctx context.Context, prompt string, workDir string) (
 // RunStreaming spawns Claude Code and pipes its stream-json output directly to
 // out (typically os.Stdout). Returns the running Cmd so the caller can manage
 // the process lifecycle. The caller should call cmd.Wait() when done.
-func (e *ClaudeEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
-	args := []string{"--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
-	args = append(args, e.extraArgs...)
-	cmd := newCmd(ctx, e.path, args, workDir)
+func (e *ClaudeEngine) RunStreaming(ctx context.Context, in EngineInput, out io.Writer) (*exec.Cmd, error) {
+	cmd := newCmd(ctx, e.path, e.buildArgs(in.SystemAppendix), in.WorkDir)
 	cmd.Env = buildEnv(e.model, resolveGitBashPath(), e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
@@ -159,7 +199,7 @@ func (e *ClaudeEngine) RunStreaming(ctx context.Context, prompt string, workDir 
 	}
 
 	go func() {
-		io.WriteString(stdin, prompt) //nolint:errcheck
+		io.WriteString(stdin, in.UserMessage) //nolint:errcheck
 		stdin.Close()
 	}()
 
@@ -219,6 +259,8 @@ func parseClaudeOutput(r io.Reader) (string, error) {
 
 // --- Codex Engine ---
 // OpenAI Codex CLI also outputs JSONL. Final answer in turn.completed or last text event.
+// Codex does not have a dedicated `--append-system-prompt` flag here, so the
+// system appendix is folded into the stdin payload as a preamble.
 
 type CodexEngine struct {
 	path      string
@@ -228,9 +270,9 @@ type CodexEngine struct {
 
 func (e *CodexEngine) Name() string { return "codex" }
 
-func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
+func (e *CodexEngine) Run(ctx context.Context, in EngineInput) (string, error) {
 	args := append([]string{"--quiet"}, e.extraArgs...)
-	cmd := newCmd(ctx, e.path, args, workDir)
+	cmd := newCmd(ctx, e.path, args, in.WorkDir)
 	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
@@ -248,8 +290,9 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 		return "", fmt.Errorf("start codex: %w", err)
 	}
 
+	payload := fallbackCombine(in.SystemAppendix, in.UserMessage)
 	go func() {
-		io.WriteString(stdin, prompt) //nolint:errcheck
+		io.WriteString(stdin, payload) //nolint:errcheck
 		stdin.Close()
 	}()
 
@@ -266,9 +309,9 @@ func (e *CodexEngine) Run(ctx context.Context, prompt string, workDir string) (s
 }
 
 // RunStreaming spawns Codex CLI and pipes its output directly to out.
-func (e *CodexEngine) RunStreaming(ctx context.Context, prompt string, workDir string, out io.Writer) (*exec.Cmd, error) {
+func (e *CodexEngine) RunStreaming(ctx context.Context, in EngineInput, out io.Writer) (*exec.Cmd, error) {
 	args := append([]string{"--quiet"}, e.extraArgs...)
-	cmd := newCmd(ctx, e.path, args, workDir)
+	cmd := newCmd(ctx, e.path, args, in.WorkDir)
 	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
@@ -282,8 +325,9 @@ func (e *CodexEngine) RunStreaming(ctx context.Context, prompt string, workDir s
 		return nil, fmt.Errorf("start codex: %w", err)
 	}
 
+	payload := fallbackCombine(in.SystemAppendix, in.UserMessage)
 	go func() {
-		io.WriteString(stdin, prompt) //nolint:errcheck
+		io.WriteString(stdin, payload) //nolint:errcheck
 		stdin.Close()
 	}()
 
@@ -319,7 +363,8 @@ func parseCodexOutput(r io.Reader) string {
 }
 
 // --- Generic Engine ---
-// Runs any command. Prompt is written to stdin; all stdout is the result.
+// Runs any command. The system appendix (if any) is prepended to the user
+// message in a single stdin payload; all stdout is the result.
 
 type GenericEngine struct {
 	path      string
@@ -329,8 +374,8 @@ type GenericEngine struct {
 
 func (e *GenericEngine) Name() string { return e.path }
 
-func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) (string, error) {
-	cmd := newCmd(ctx, e.path, e.extraArgs, workDir)
+func (e *GenericEngine) Run(ctx context.Context, in EngineInput) (string, error) {
+	cmd := newCmd(ctx, e.path, e.extraArgs, in.WorkDir)
 	cmd.Env = buildEnv("", "", e.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
@@ -348,8 +393,9 @@ func (e *GenericEngine) Run(ctx context.Context, prompt string, workDir string) 
 		return "", fmt.Errorf("start engine %s: %w", e.path, err)
 	}
 
+	payload := fallbackCombine(in.SystemAppendix, in.UserMessage)
 	go func() {
-		io.WriteString(stdin, prompt) //nolint:errcheck
+		io.WriteString(stdin, payload) //nolint:errcheck
 		stdin.Close()
 	}()
 

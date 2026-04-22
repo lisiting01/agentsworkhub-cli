@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -520,4 +524,108 @@ func (c *Client) ResumeJob(jobID string) (*Job, error) {
 	var out Job
 	_, err := c.do("POST", "/api/jobs/"+jobID+"/resume", struct{}{}, &out)
 	return &out, err
+}
+
+// --- Files (three-step upload) ---
+//
+// The platform uses a pre-signed URL flow for file uploads:
+//
+//  1. POST /api/files/presign-upload     → returns {fileId, uploadUrl, expiresIn}
+//  2. PUT <uploadUrl>                    → upload raw file bytes to R2
+//  3. POST /api/files/{fileId}/confirm   → finalize; returns the File record
+//
+// Consumers attach the resulting fileId to jobs/messages via their
+// `attachments` field. Platform contract (see agentsworkhub/app/api/files/...):
+//   • presign request uses `mimeType` (not `contentType`) and requires `size`.
+//   • File record uses `originalName` + `mimeType` in JSON.
+
+type File struct {
+	ID           string     `json:"_id"`
+	OriginalName string     `json:"originalName"`
+	MimeType     string     `json:"mimeType,omitempty"`
+	Size         int64      `json:"size,omitempty"`
+	Confirmed    bool       `json:"confirmed,omitempty"`
+	CreatedAt    *time.Time `json:"createdAt,omitempty"`
+}
+
+type PresignUploadRequest struct {
+	Filename string `json:"filename"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+}
+
+type PresignUploadResponse struct {
+	FileID    string `json:"fileId"`
+	UploadURL string `json:"uploadUrl"`
+	ExpiresIn int    `json:"expiresIn,omitempty"`
+}
+
+// PresignUpload requests a pre-signed PUT URL for uploading a file. All three
+// fields are required by the platform; size must be a positive byte count and
+// is capped at 500 MB server-side.
+func (c *Client) PresignUpload(filename, mimeType string, size int64) (*PresignUploadResponse, error) {
+	var out PresignUploadResponse
+	_, err := c.do("POST", "/api/files/presign-upload", PresignUploadRequest{
+		Filename: filename,
+		MimeType: mimeType,
+		Size:     size,
+	}, &out)
+	return &out, err
+}
+
+// UploadToPresignedURL PUTs the local file at filePath to uploadURL with the
+// given contentType. It is a package-level function (not bound to a Client)
+// because the pre-signed URL already embeds the auth credentials — no
+// X-Agent-* headers should be attached.
+func UploadToPresignedURL(uploadURL, filePath, contentType string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPut, uploadURL, f)
+	if err != nil {
+		return fmt.Errorf("build upload request: %w", err)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.ContentLength = stat.Size()
+
+	httpClient := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// ConfirmUpload finalizes a presigned upload. The platform verifies the object
+// has been stored and returns the canonical File record.
+func (c *Client) ConfirmUpload(fileID string) (*File, error) {
+	var out File
+	_, err := c.do("POST", "/api/files/"+fileID+"/confirm", struct{}{}, &out)
+	return &out, err
+}
+
+// DetectContentType returns a best-effort MIME type for a local file path.
+// Falls back to "application/octet-stream".
+func DetectContentType(filePath string) string {
+	if ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(filePath))); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
 }

@@ -19,25 +19,40 @@ var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Manage AI agent workers (spawn, monitor, stop)",
 	Long: `Spawn an AI sub-instance that autonomously operates on the AgentsWorkhub
-platform using awh CLI commands. The sub-instance receives your platform
-credentials and a comprehensive command reference via its system prompt.
+platform using the awh CLI. Claude Code is already a capable agent; this
+command simply gives it access to ` + "`awh`" + ` and a trigger signal, then steps
+out of the way.
 
-This is the recommended way for an AI agent to run background AWH work
-without blocking its main conversation.`,
+Recommended usage:
+  awh agent schedule --work-dir ./my-agent --daemon
+
+Put a CLAUDE.md in --work-dir to describe who the agent is and any domain
+context. Claude Code auto-loads it — this is the standard convention and is
+the primary way to customize behavior.`,
 }
 
 var agentRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Spawn an AI agent worker",
-	Long: `Spawn an AI sub-instance (Claude Code, Codex, etc.) with platform context
-injected. The worker's JSONL event stream is written to stdout (foreground)
+	Long: `Spawn an AI sub-instance (Claude Code, Codex, etc.) with access to the
+awh CLI. The worker's JSONL event stream is written to stdout (foreground)
 or to a log file (daemon mode).
 
+Recommended usage:
+  awh agent run --engine claude --work-dir ./my-agent
+
+The agent automatically loads CLAUDE.md from --work-dir. Put the agent's
+identity, domain knowledge, or long-term preferences there.
+
+--prompt / --skill are advanced options for session-specific instructions.
+They are usually unnecessary — if you find yourself reaching for them,
+consider moving the content to CLAUDE.md instead.
+
 Examples:
-  awh agent run --engine claude --prompt "Find open tasks and complete them"
-  awh agent run --engine claude --skill ./my-executor-skill.md
-  awh agent run --engine claude --engine-model claude-sonnet-4-20250514 --daemon
-  awh agent run --engine codex --prompt "Review submitted tasks"`,
+  awh agent run --engine claude --work-dir ./my-agent
+  awh agent run --engine claude --prompt "Focus on design tasks today"
+  awh agent run --engine claude --work-dir ./my-agent --daemon
+  awh agent run --engine codex --work-dir ./my-agent`,
 	RunE: runAgentRun,
 }
 
@@ -64,15 +79,19 @@ func init() {
 	agentRunCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
 	agentRunCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
 	agentRunCmd.Flags().String("engine-model", "", "AI model name (e.g. claude-sonnet-4-20250514)")
-	agentRunCmd.Flags().StringP("prompt", "p", "", "Mission prompt for the worker")
-	agentRunCmd.Flags().String("skill", "", "Path to a skill file (.md) to inject as the mission")
-	agentRunCmd.Flags().String("work-dir", "", "Working directory for the AI sub-instance")
+	agentRunCmd.Flags().String("work-dir", "", "Working directory for the worker. Put CLAUDE.md here to give the agent identity/project context (primary customization mechanism)")
+	agentRunCmd.Flags().StringP("prompt", "p", "", "[Advanced] One-off instruction for this session only. Usually unnecessary — put context in --work-dir/CLAUDE.md instead")
+	agentRunCmd.Flags().String("skill", "", "[Advanced] Path to a .md file whose content becomes a one-off instruction (longer than --prompt). Usually unnecessary")
 	agentRunCmd.Flags().Bool("daemon", false, "Run as a background daemon")
 
 	agentRunCmd.Flags().Bool("_daemonize", false, "internal: run as daemon child")
 	agentRunCmd.Flags().String("_worker-id", "", "internal: worker id for daemon child")
+	agentRunCmd.Flags().String("_sse-event-type", "", "internal: SSE event that triggered spawn")
+	agentRunCmd.Flags().String("_sse-event-data", "", "internal: raw JSON payload of the SSE event")
 	_ = agentRunCmd.Flags().MarkHidden("_daemonize")
 	_ = agentRunCmd.Flags().MarkHidden("_worker-id")
+	_ = agentRunCmd.Flags().MarkHidden("_sse-event-type")
+	_ = agentRunCmd.Flags().MarkHidden("_sse-event-data")
 
 	agentStopCmd.Flags().String("id", "", "Worker ID to stop (default: stop all)")
 }
@@ -92,15 +111,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	daemonMode, _ := cmd.Flags().GetBool("daemon")
 	isDaemonChild, _ := cmd.Flags().GetBool("_daemonize")
 	workerIDFlag, _ := cmd.Flags().GetString("_worker-id")
+	sseEventType, _ := cmd.Flags().GetString("_sse-event-type")
+	sseEventData, _ := cmd.Flags().GetString("_sse-event-data")
 
 	if enginePath == "" {
 		enginePath = engineName
-	}
-
-	// prompt and skill are optional when --work-dir is provided and the
-	// project has a CLAUDE.md — Claude Code will auto-load it.
-	if prompt == "" && skillPath == "" && workDir == "" {
-		output.Warn("No --prompt, --skill, or --work-dir provided. The agent will rely on its system prompt alone.")
 	}
 
 	var skillContent string
@@ -113,7 +128,13 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		skillContent = content
 	}
 
-	systemPrompt := daemon.BuildAgentSystemPrompt(cfg.Name, cfg.BaseURL, prompt, skillContent)
+	systemAppendix := daemon.BuildSystemAppendix(cfg.Name, cfg.BaseURL)
+	userMessage := daemon.BuildUserMessage(daemon.TriggerContext{
+		UserPrompt:   prompt,
+		SkillContent: skillContent,
+		EventType:    sseEventType,
+		EventData:    sseEventData,
+	})
 
 	eng := daemon.NewEngine(engineName, enginePath, engineModel, nil, cfg.Env)
 	streamEng, ok := eng.(daemon.StreamingEngine)
@@ -172,7 +193,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		outDest = outWriter
 	}
 
-	aiCmd, err := streamEng.RunStreaming(ctx, systemPrompt, workDir, outDest)
+	aiCmd, err := streamEng.RunStreaming(ctx, daemon.EngineInput{
+		SystemAppendix: systemAppendix,
+		UserMessage:    userMessage,
+		WorkDir:        workDir,
+	}, outDest)
 	if err != nil {
 		output.Error(fmt.Sprintf("Failed to start AI engine: %v", err))
 		return nil

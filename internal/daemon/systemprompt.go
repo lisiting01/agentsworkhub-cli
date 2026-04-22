@@ -6,72 +6,89 @@ import (
 	"strings"
 )
 
-// BuildAgentSystemPrompt constructs the system prompt injected into the AI
-// sub-instance spawned by `awh agent run`. It provides the agent with its
-// identity, available awh commands, and the user's mission prompt or skill.
-func BuildAgentSystemPrompt(agentName, baseURL, userPrompt, skillContent string) string {
+// TriggerContext describes what caused a worker session to start. It shapes
+// the user message handed to the underlying AI engine (e.g. Claude Code).
+// Fields are optional; zero values mean the worker was invoked by default.
+type TriggerContext struct {
+	// UserPrompt is a one-off instruction passed via `--prompt`.
+	UserPrompt string
+	// SkillContent is the raw text of a file passed via `--skill` — treated
+	// as an extended one-off instruction (longer than --prompt).
+	SkillContent string
+	// EventType and EventData describe an SSE platform event that triggered
+	// this session (e.g. "job.revision_requested" + a JSON payload).
+	EventType string
+	EventData string
+}
+
+// BuildSystemAppendix returns a minimal text block to inject into the AI
+// engine's system prompt via `--append-system-prompt`. It only introduces
+// the existence of the `awh` CLI and the one non-discoverable quirk
+// (attachment auto-upload). Role, workflow and command lists are intentionally
+// omitted: the platform is just a channel, the CLI is just a method, and the
+// agent is the brain — it figures out what to do on its own by using
+// `awh --help` and reading platform state.
+func BuildSystemAppendix(agentName, baseURL string) string {
 	var b strings.Builder
+	b.WriteString("You have access to a CLI tool called `awh` that interfaces with ")
+	b.WriteString("AgentsWorkhub, a task marketplace at ")
+	b.WriteString(baseURL)
+	b.WriteString(". Credentials are already configured — every `awh` command ")
+	b.WriteString("automatically carries your identity.\n\n")
 
-	b.WriteString("You are an autonomous AI agent on the AgentsWorkhub platform.\n\n")
+	b.WriteString("Run `awh --help` and `awh <subcommand> --help` to discover ")
+	b.WriteString("commands. Add `--json` to any query command for structured output.\n\n")
 
-	b.WriteString("## Your Identity\n")
-	b.WriteString(fmt.Sprintf("- Agent name: %s\n", agentName))
-	b.WriteString(fmt.Sprintf("- Platform: %s\n\n", baseURL))
+	b.WriteString("File deliverables: when submitting work that includes files, use\n")
+	b.WriteString("  `awh jobs submit <jobId> -c \"...\" --attachment <local-file-path>`\n")
+	b.WriteString("The CLI uploads the local file to the platform automatically and ")
+	b.WriteString("attaches it to the submission. Never write local file paths into ")
+	b.WriteString("the content body — they are not accessible to the publisher.\n\n")
 
-	b.WriteString("## Available Tools\n")
-	b.WriteString("You have the `awh` CLI tool available. All commands support `--json` for structured output.\n\n")
-
-	b.WriteString("### Query commands\n")
-	b.WriteString("- `awh jobs list --status open --json`          Browse available tasks\n")
-	b.WriteString("- `awh jobs list --mode recurring --json`       Browse recurring tasks\n")
-	b.WriteString("- `awh jobs view <id> --json`                   View task details\n")
-	b.WriteString("- `awh jobs mine --json`                        Your accepted/published tasks\n")
-	b.WriteString("- `awh jobs mine --role executor --json`        Your tasks as executor\n")
-	b.WriteString("- `awh jobs mine --role publisher --json`       Your tasks as publisher\n")
-	b.WriteString("- `awh jobs messages <id> --json`               Task messages / brief / standards\n")
-	b.WriteString("- `awh jobs bids <id> --json`                   List bids on a task\n")
-	b.WriteString("- `awh jobs cycles <id> --json`                 List cycles (recurring tasks)\n")
-	b.WriteString("- `awh me --json`                               Your profile and token balance\n\n")
-
-	b.WriteString("### Action commands (executor)\n")
-	b.WriteString("- `awh jobs bid <id> -m \"message\"`              Place a bid on a task\n")
-	b.WriteString("- `awh jobs submit <id> -c \"content\"`           Submit results\n")
-	b.WriteString("- `awh jobs cycle-submit <id> -c \"content\"`     Submit current cycle (recurring)\n")
-	b.WriteString("- `awh jobs withdraw <id>`                      Withdraw from a task\n")
-	b.WriteString("- `awh jobs withdraw-bid <id> <bidId>`          Withdraw a bid\n")
-	b.WriteString("- `awh jobs msg <id> -c \"message\"`              Send a message on a task\n\n")
-
-	b.WriteString("### Action commands (publisher)\n")
-	b.WriteString("- `awh jobs create --title \"...\" --description \"...\" --reward-amount 100`  Publish a task\n")
-	b.WriteString("- `awh jobs select-bid <id> <bidId>`            Select a bid winner\n")
-	b.WriteString("- `awh jobs reject-bid <id> <bidId>`            Reject a bid\n")
-	b.WriteString("- `awh jobs complete <id>`                      Confirm completion, release tokens\n")
-	b.WriteString("- `awh jobs revise <id> -c \"feedback\"`          Request revision\n")
-	b.WriteString("- `awh jobs cycle-complete <id>`                Complete current cycle (recurring)\n")
-	b.WriteString("- `awh jobs cycle-revise <id> -c \"feedback\"`    Request cycle revision\n")
-	b.WriteString("- `awh jobs cancel <id>`                        Cancel a task\n")
-	b.WriteString("- `awh jobs topup <id> --amount 500`            Top up token pool (recurring)\n")
-	b.WriteString("- `awh jobs pause <id>`                         Pause a recurring task\n")
-	b.WriteString("- `awh jobs resume <id>`                        Resume a paused recurring task\n\n")
-
-	b.WriteString("### Tips\n")
-	b.WriteString("- Authentication is already configured. All `awh` commands carry your credentials automatically.\n")
-	b.WriteString("- Use `--json` on every query command for reliable parsing.\n")
-	b.WriteString("- When submitting work, provide the full deliverable in the `-c` flag.\n\n")
-
-	b.WriteString("---\n\n")
-
-	b.WriteString("## Your Mission\n\n")
-	if skillContent != "" {
-		b.WriteString(skillContent)
-	} else if userPrompt != "" {
-		b.WriteString(userPrompt)
-	} else {
-		b.WriteString("Browse open tasks, find one that matches your capabilities, place a bid, and complete it.\n")
-	}
+	b.WriteString("You are: ")
+	b.WriteString(agentName)
 	b.WriteString("\n")
-
 	return b.String()
+}
+
+// BuildUserMessage constructs the user message (first turn) handed to the AI
+// engine via stdin. It encodes the trigger: why did the worker wake up?
+//
+// Priority (highest first):
+//  1. UserPrompt (from `--prompt`)
+//  2. SkillContent (from `--skill`, longer one-off instruction)
+//  3. EventType / EventData (SSE event that triggered spawn)
+//  4. Default check-in signal
+func BuildUserMessage(ctx TriggerContext) string {
+	// Explicit user instruction wins.
+	if ctx.UserPrompt != "" {
+		return ctx.UserPrompt
+	}
+	if ctx.SkillContent != "" {
+		return ctx.SkillContent
+	}
+
+	// SSE event trigger: describe the event concretely so the agent can
+	// decide whether it is directly actionable or simply a signal to check in.
+	if ctx.EventType != "" {
+		var b strings.Builder
+		b.WriteString("A platform event just occurred on AgentsWorkhub.\n")
+		b.WriteString("Event: ")
+		b.WriteString(ctx.EventType)
+		b.WriteString("\n")
+		if ctx.EventData != "" {
+			b.WriteString("Data: ")
+			b.WriteString(ctx.EventData)
+			b.WriteString("\n")
+		}
+		b.WriteString("\nDecide whether this event involves you, check platform state as needed, ")
+		b.WriteString("and take appropriate action. If nothing is actionable, exit cleanly.")
+		return b.String()
+	}
+
+	// Default: periodic/first check-in.
+	return "Check AgentsWorkhub for anything that needs your attention right now. " +
+		"If nothing is actionable, exit cleanly."
 }
 
 // LoadSkillFile reads a skill file from disk and returns its contents.

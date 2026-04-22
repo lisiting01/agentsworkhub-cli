@@ -27,16 +27,23 @@ completion, avoiding context accumulation.
 
 By default the scheduler connects to the platform SSE event stream and spawns a
 worker immediately on events like "job.created", "job.assigned", or
-"job.revision_requested". A fallback interval (default 900s) ensures the agent
-wakes up even if the SSE connection is interrupted.
+"job.revision_requested". The triggering event is handed to the worker as its
+user message so it knows what just happened. A fallback interval (default 900s)
+ensures the agent wakes up even if the SSE connection is interrupted.
 
-If --work-dir points to a directory containing CLAUDE.md, Claude Code will
-auto-load it as the agent's mission — no --prompt or --skill required.
+Recommended usage:
+  awh agent schedule --engine claude --work-dir ./my-agent --daemon
+
+Put a CLAUDE.md in --work-dir to give the agent its identity, domain knowledge,
+or long-term preferences — Claude Code auto-loads it. This is the standard
+convention and is the primary way to customize behavior.
+
+--prompt / --skill are advanced options for session-specific instructions and
+are almost never needed. Prefer editing CLAUDE.md.
 
 Examples:
   awh agent schedule --engine claude --work-dir ./my-agent --daemon
-  awh agent schedule --engine claude --skill ./ops.md --daemon
-  awh agent schedule --engine claude --prompt "Find and bid on open tasks" --name agent-a --daemon
+  awh agent schedule --engine claude --work-dir ./my-agent --name agent-a --daemon
   awh agent schedule status
   awh agent schedule stop --name agent-a
   awh agent schedule stop --force`,
@@ -63,9 +70,9 @@ func initAgentScheduleCmd() {
 	agentScheduleCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
 	agentScheduleCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
 	agentScheduleCmd.Flags().String("engine-model", "", "AI model name")
-	agentScheduleCmd.Flags().StringP("prompt", "p", "", "Mission prompt for each worker (optional if CLAUDE.md is in --work-dir)")
-	agentScheduleCmd.Flags().String("skill", "", "Path to a skill file (.md) injected as the mission")
-	agentScheduleCmd.Flags().String("work-dir", "", "Working directory for each AI sub-instance (CLAUDE.md here is auto-loaded by Claude Code)")
+	agentScheduleCmd.Flags().StringP("prompt", "p", "", "[Advanced] One-off instruction used on every worker spawn that is NOT SSE-triggered. Usually unnecessary — put context in --work-dir/CLAUDE.md instead")
+	agentScheduleCmd.Flags().String("skill", "", "[Advanced] Path to a .md file whose content becomes the one-off instruction (longer than --prompt). Usually unnecessary")
+	agentScheduleCmd.Flags().String("work-dir", "", "Working directory for each worker. Put CLAUDE.md here to give the agent identity/project context (primary customization mechanism — Claude Code auto-loads it)")
 	agentScheduleCmd.Flags().Int("interval", 900, "Fallback seconds to wait after a worker completes when no SSE event triggers a spawn")
 	agentScheduleCmd.Flags().String("name", "default", "Scheduler instance name (allows multiple schedulers)")
 	agentScheduleCmd.Flags().Bool("daemon", false, "Run as a background daemon")
@@ -289,13 +296,17 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 		currentCancel context.CancelFunc
 	)
 
-	spawnWorker := func() {
+	spawnWorker := func(ev *daemon.WatcherEvent) {
 		workerID := daemon.GenerateWorkerID()
 		info.CurrentWorkerID = workerID
 		_ = ss.WriteInfo(info)
 
-		workerArgs := buildSchedulerWorkerArgs(exePath, workerID, info)
-		logf("round %d: spawning worker %s", info.Round+1, workerID)
+		workerArgs := buildSchedulerWorkerArgs(exePath, workerID, info, ev)
+		if ev != nil {
+			logf("round %d: spawning worker %s (trigger: %s)", info.Round+1, workerID, ev.Type)
+		} else {
+			logf("round %d: spawning worker %s", info.Round+1, workerID)
+		}
 
 		ww, err := daemon.NewWorkerState(workerID)
 		if err != nil {
@@ -351,7 +362,7 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 
 	// Attempt first spawn immediately.
 	if shouldSpawnNow() {
-		spawnWorker()
+		spawnWorker(nil)
 	}
 
 	for {
@@ -380,9 +391,9 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 			}
 			logf("SSE event received: %s — attempting spawn", event.Type)
 			if shouldSpawnNow() {
-				spawnWorker()
+				spawnWorker(&event)
 			} else if info.CurrentWorkerID != "" {
-				logf("worker already running, SSE event queued until completion")
+				logf("worker already running, SSE event dropped (worker will check platform state on next spawn)")
 			}
 
 		case res := <-workerDone:
@@ -404,7 +415,7 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 
 		case <-ticker.C:
 			if shouldSpawnNow() {
-				spawnWorker()
+				spawnWorker(nil)
 			} else if info.CurrentWorkerID == "" && info.LastCompletedAt != nil {
 				remaining := time.Duration(info.IntervalSecs)*time.Second - time.Since(*info.LastCompletedAt)
 				if remaining > 0 {
@@ -417,7 +428,11 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 
 // buildSchedulerWorkerArgs constructs the argument list for a worker child process.
 // Uses --_daemonize so the worker runs with its output redirected to its own log.
-func buildSchedulerWorkerArgs(exePath, workerID string, info *daemon.SchedulerInfo) []string {
+// If ev is non-nil the event type and payload are forwarded via hidden flags so
+// the worker's user message can describe the triggering event. When an SSE event
+// is supplied, --prompt / --skill are deliberately suppressed because they would
+// otherwise override the event-based trigger signal.
+func buildSchedulerWorkerArgs(exePath, workerID string, info *daemon.SchedulerInfo, ev *daemon.WatcherEvent) []string {
 	args := []string{exePath, "agent", "run",
 		"--_daemonize",
 		"--_worker-id", workerID,
@@ -429,14 +444,24 @@ func buildSchedulerWorkerArgs(exePath, workerID string, info *daemon.SchedulerIn
 	if info.EngineModel != "" {
 		args = append(args, "--engine-model", info.EngineModel)
 	}
-	if info.Prompt != "" {
-		args = append(args, "--prompt", info.Prompt)
-	}
-	if info.SkillFile != "" {
-		args = append(args, "--skill", info.SkillFile)
+	// Only propagate the static --prompt / --skill when the spawn is NOT
+	// event-driven; otherwise the event itself IS the trigger signal.
+	if ev == nil {
+		if info.Prompt != "" {
+			args = append(args, "--prompt", info.Prompt)
+		}
+		if info.SkillFile != "" {
+			args = append(args, "--skill", info.SkillFile)
+		}
 	}
 	if info.WorkDir != "" {
 		args = append(args, "--work-dir", info.WorkDir)
+	}
+	if ev != nil {
+		args = append(args, "--_sse-event-type", ev.Type)
+		if ev.Data != "" {
+			args = append(args, "--_sse-event-data", ev.Data)
+		}
 	}
 	if baseURLOverride != "" {
 		args = append(args, "--base-url", baseURLOverride)

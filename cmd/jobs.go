@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/lisiting01/agentsworkhub-cli/internal/api"
@@ -9,6 +12,82 @@ import (
 	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
+
+// hexID24 matches a 24-char hex string — the shape of a Mongo ObjectID and
+// thus of a platform fileId. Used to decide whether an --attachment value is
+// already an ID or should be treated as a local file path.
+var hexID24 = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
+
+// localPathHints matches content strings that look like local file paths
+// (Windows drive letters, *nix absolute home/Users/home/var, or UNC).
+// Triggers a warning when found inside a -c / --content body.
+var localPathHints = regexp.MustCompile(`(?m)(?:^|[\s"'(\[])(?:[A-Za-z]:[\\/]|/(?:home|Users|var|tmp|etc)/|\\\\[^\\/]+\\)`)
+
+// resolveAttachments walks the raw values passed via --attachment. For each
+// entry that looks like a local file that exists on disk, it runs the
+// three-step presign → PUT → confirm flow and returns the resulting fileId.
+// Entries that already look like a fileId (24-hex) or a non-existent path
+// (user clearly meant an ID) are passed through untouched.
+func resolveAttachments(client *api.Client, raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	resolved := make([]string, 0, len(raw))
+	for _, val := range raw {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			continue
+		}
+		// Already a fileId — use as-is.
+		if hexID24.MatchString(val) {
+			resolved = append(resolved, val)
+			continue
+		}
+		info, err := os.Stat(val)
+		if err != nil || info.IsDir() {
+			// Not a local file; assume the user already has a server-side
+			// fileId/identifier. Let the platform reject it if invalid.
+			resolved = append(resolved, val)
+			continue
+		}
+
+		filename := filepath.Base(val)
+		mimeType := api.DetectContentType(val)
+		size := info.Size()
+		if size <= 0 {
+			return nil, fmt.Errorf("attachment %s is empty (0 bytes); platform requires size > 0", filename)
+		}
+
+		fmt.Println(output.Faint(fmt.Sprintf("↑ Uploading %s (%s, %d bytes)...", filename, mimeType, size)))
+
+		presign, err := client.PresignUpload(filename, mimeType, size)
+		if err != nil {
+			return nil, fmt.Errorf("presign upload for %s: %w", filename, err)
+		}
+		if err := api.UploadToPresignedURL(presign.UploadURL, val, mimeType); err != nil {
+			return nil, fmt.Errorf("upload %s: %w", filename, err)
+		}
+		file, err := client.ConfirmUpload(presign.FileID)
+		if err != nil {
+			return nil, fmt.Errorf("confirm upload %s: %w", filename, err)
+		}
+		output.Success(fmt.Sprintf("Uploaded %s → fileId %s", filename, file.ID))
+		resolved = append(resolved, file.ID)
+	}
+	return resolved, nil
+}
+
+// warnIfContentLooksLikeLocalPath prints a warning when the user embedded a
+// local filesystem path inside the content body — the platform cannot read
+// local files, so they should have used --attachment instead.
+func warnIfContentLooksLikeLocalPath(content string) {
+	if content == "" {
+		return
+	}
+	if localPathHints.MatchString(content) {
+		output.Warn("Content appears to contain a local file path. The platform cannot access your local filesystem — use --attachment <path> to upload files instead.")
+	}
+}
 
 var jobsCmd = &cobra.Command{
 	Use:   "jobs",
@@ -255,7 +334,7 @@ func init() {
 	jobsMineCmd.Flags().Int("limit", 20, "Results per page")
 
 	jobsSubmitCmd.Flags().StringP("content", "c", "", "Submission message content")
-	jobsSubmitCmd.Flags().StringSlice("attachment", nil, "File ID(s) to attach (repeatable)")
+	jobsSubmitCmd.Flags().StringSlice("attachment", nil, "Local file path(s) or existing fileId(s) to attach (repeatable). Local paths are auto-uploaded")
 
 	jobsReviseCmd.Flags().StringP("content", "c", "", "Revision request message (required)")
 	_ = jobsReviseCmd.MarkFlagRequired("content")
@@ -270,7 +349,7 @@ func init() {
 	jobsCyclesCmd.Flags().Int("limit", 20, "Results per page")
 
 	jobsCycleSubmitCmd.Flags().StringP("content", "c", "", "Deliverable content")
-	jobsCycleSubmitCmd.Flags().StringSlice("attachment", nil, "File ID(s) to attach")
+	jobsCycleSubmitCmd.Flags().StringSlice("attachment", nil, "Local file path(s) or existing fileId(s) to attach (repeatable). Local paths are auto-uploaded")
 
 	jobsCycleReviseCmd.Flags().StringP("content", "c", "", "Revision feedback (required)")
 	_ = jobsCycleReviseCmd.MarkFlagRequired("content")
@@ -595,10 +674,19 @@ func runJobsSubmit(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	warnIfContentLooksLikeLocalPath(content)
+
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+
+	resolvedAttachments, err := resolveAttachments(client, attachments)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
 	job, err := client.SubmitJob(args[0], api.SubmitRequest{
 		Content:     content,
-		Attachments: attachments,
+		Attachments: resolvedAttachments,
 	})
 	if err != nil {
 		output.Error(err.Error())
@@ -935,10 +1023,19 @@ func runJobsCycleSubmit(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	warnIfContentLooksLikeLocalPath(content)
+
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+
+	resolvedAttachments, err := resolveAttachments(client, attachments)
+	if err != nil {
+		output.Error(err.Error())
+		return nil
+	}
+
 	cycle, err := client.SubmitCycle(args[0], api.SubmitRequest{
 		Content:     content,
-		Attachments: attachments,
+		Attachments: resolvedAttachments,
 	})
 	if err != nil {
 		output.Error(err.Error())
