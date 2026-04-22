@@ -58,6 +58,19 @@ func requireAuth() (*config.Config, error) {
 	return cfg, nil
 }
 
+// loadConfig loads config silently (no user-facing error output).
+// Used in daemon children where stderr goes to a log file.
+func loadConfig() (*config.Config, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	if baseURLOverride != "" {
+		cfg.BaseURL = baseURLOverride
+	}
+	return cfg, nil
+}
+
 func runMe(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {

@@ -21,15 +21,22 @@ var agentScheduleCmd = &cobra.Command{
 	Use:   "schedule",
 	Short: "Start a persistent scheduler that repeatedly spawns fresh agent workers",
 	Long: `Run a lightweight persistent process that spawns a brand-new "awh agent run"
-instance on a fixed interval. Each worker starts with a clean context and is
-destroyed after completion, avoiding context accumulation.
+instance whenever a relevant platform event arrives (SSE-driven) or the fallback
+interval elapses. Each worker starts with a clean context and is destroyed after
+completion, avoiding context accumulation.
 
-The interval counts from the moment the previous worker finishes, not a fixed
-wall-clock frequency, so workers never stack up.
+By default the scheduler connects to the platform SSE event stream and spawns a
+worker immediately on events like "job.created", "job.assigned", or
+"job.revision_requested". A fallback interval (default 900s) ensures the agent
+wakes up even if the SSE connection is interrupted.
+
+If --work-dir points to a directory containing CLAUDE.md, Claude Code will
+auto-load it as the agent's mission — no --prompt or --skill required.
 
 Examples:
-  awh agent schedule --engine claude --skill ./ops.md --interval 120 --daemon
-  awh agent schedule --engine claude --prompt "Process new jobs" --interval 300 --name agent-a --daemon
+  awh agent schedule --engine claude --work-dir ./my-agent --daemon
+  awh agent schedule --engine claude --skill ./ops.md --daemon
+  awh agent schedule --engine claude --prompt "Find and bid on open tasks" --name agent-a --daemon
   awh agent schedule status
   awh agent schedule stop --name agent-a
   awh agent schedule stop --force`,
@@ -56,12 +63,13 @@ func initAgentScheduleCmd() {
 	agentScheduleCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
 	agentScheduleCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
 	agentScheduleCmd.Flags().String("engine-model", "", "AI model name")
-	agentScheduleCmd.Flags().StringP("prompt", "p", "", "Mission prompt for each worker")
+	agentScheduleCmd.Flags().StringP("prompt", "p", "", "Mission prompt for each worker (optional if CLAUDE.md is in --work-dir)")
 	agentScheduleCmd.Flags().String("skill", "", "Path to a skill file (.md) injected as the mission")
-	agentScheduleCmd.Flags().String("work-dir", "", "Working directory for each AI sub-instance")
-	agentScheduleCmd.Flags().Int("interval", 300, "Seconds to wait after a worker completes before spawning the next one")
+	agentScheduleCmd.Flags().String("work-dir", "", "Working directory for each AI sub-instance (CLAUDE.md here is auto-loaded by Claude Code)")
+	agentScheduleCmd.Flags().Int("interval", 900, "Fallback seconds to wait after a worker completes when no SSE event triggers a spawn")
 	agentScheduleCmd.Flags().String("name", "default", "Scheduler instance name (allows multiple schedulers)")
 	agentScheduleCmd.Flags().Bool("daemon", false, "Run as a background daemon")
+	agentScheduleCmd.Flags().Bool("watch", true, "Connect to platform SSE stream for instant event-driven spawning (disable with --watch=false)")
 
 	agentScheduleCmd.Flags().Bool("_schedulize", false, "internal: running as scheduler daemon child")
 	agentScheduleCmd.Flags().String("_scheduler-name", "", "internal: scheduler name for daemon child")
@@ -89,15 +97,11 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	intervalSecs, _ := cmd.Flags().GetInt("interval")
 	name, _ := cmd.Flags().GetString("name")
 	daemonMode, _ := cmd.Flags().GetBool("daemon")
+	watchMode, _ := cmd.Flags().GetBool("watch")
 	isChild, _ := cmd.Flags().GetBool("_schedulize")
 	childName, _ := cmd.Flags().GetString("_scheduler-name")
 
 	_ = cfg // auth confirmed; credentials embedded in system prompt by BuildAgentSystemPrompt
-
-	if prompt == "" && skillPath == "" {
-		output.Error("Provide --prompt or --skill to give the agent a mission")
-		return nil
-	}
 	if enginePath == "" {
 		enginePath = engineName
 	}
@@ -130,6 +134,7 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 		SkillFile:    skillPath,
 		WorkDir:      workDir,
 		IntervalSecs: intervalSecs,
+		WatchEnabled: watchMode,
 		PID:          os.Getpid(),
 		StartedAt:    time.Now(),
 	}
@@ -185,6 +190,9 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 	}
 	childArgs = append(childArgs, "--interval", fmt.Sprintf("%d", info.IntervalSecs))
 	childArgs = append(childArgs, "--name", info.Name)
+	if !info.WatchEnabled {
+		childArgs = append(childArgs, "--watch=false")
+	}
 	if baseURLOverride != "" {
 		childArgs = append(childArgs, "--base-url", baseURLOverride)
 	}
@@ -238,8 +246,8 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 // ── scheduler loop ─────────────────────────────────────────────────────────
 
 // runSchedulerLoop is the core scheduler logic that runs inside the daemon child.
-// It spawns a fresh "awh agent run" worker on the configured interval, waits for
-// completion, then waits interval seconds before spawning again.
+// It spawns a fresh "awh agent run" worker either immediately on an SSE event
+// (when --watch is enabled) or on the fallback interval ticker.
 func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daemon.SchedulerInfo) {
 	logf := func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "[scheduler:%s] "+format+"\n", append([]any{info.Name}, a...)...)
@@ -249,6 +257,22 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 	if err != nil {
 		logf("cannot resolve executable: %v", err)
 		return
+	}
+
+	// Start SSE watcher if enabled. The watcher runs in its own goroutine and
+	// reconnects automatically; it feeds actionable events into triggerCh.
+	var triggerCh <-chan daemon.WatcherEvent
+	if info.WatchEnabled {
+		if cfg, err2 := loadConfig(); err2 == nil && cfg.IsLoggedIn() {
+			baseURL := cfg.BaseURL
+			if baseURLOverride != "" {
+				baseURL = baseURLOverride
+			}
+			triggerCh = daemon.Watch(ctx, baseURL, cfg.Name, cfg.Token, logf)
+			logf("SSE watch enabled (fallback interval: %ds)", info.IntervalSecs)
+		} else {
+			logf("SSE watch skipped: not logged in or config error")
+		}
 	}
 
 	ticker := time.NewTicker(schedulerPollInterval)
@@ -348,6 +372,19 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 			}
 			return
 
+		case event, ok := <-triggerCh:
+			if !ok {
+				// Channel closed means Watch returned (ctx cancelled).
+				triggerCh = nil
+				continue
+			}
+			logf("SSE event received: %s — attempting spawn", event.Type)
+			if shouldSpawnNow() {
+				spawnWorker()
+			} else if info.CurrentWorkerID != "" {
+				logf("worker already running, SSE event queued until completion")
+			}
+
 		case res := <-workerDone:
 			if currentCancel != nil {
 				currentCancel()
@@ -360,9 +397,9 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 			info.CurrentWorkerID = ""
 			_ = ss.WriteInfo(info)
 			if res.err != nil {
-				logf("round %d finished with error: %v (next in %ds)", info.Round, res.err, info.IntervalSecs)
+				logf("round %d finished with error: %v (fallback next in %ds)", info.Round, res.err, info.IntervalSecs)
 			} else {
-				logf("round %d completed (next in %ds)", info.Round, info.IntervalSecs)
+				logf("round %d completed (fallback next in %ds)", info.Round, info.IntervalSecs)
 			}
 
 		case <-ticker.C:
@@ -371,7 +408,7 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 			} else if info.CurrentWorkerID == "" && info.LastCompletedAt != nil {
 				remaining := time.Duration(info.IntervalSecs)*time.Second - time.Since(*info.LastCompletedAt)
 				if remaining > 0 {
-					logf("idle, next spawn in %s", remaining.Round(time.Second))
+					logf("idle, next fallback spawn in %s", remaining.Round(time.Second))
 				}
 			}
 		}

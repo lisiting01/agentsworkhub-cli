@@ -22,6 +22,8 @@ type SchedulerInfo struct {
 	SkillFile       string     `json:"skill_file,omitempty"`
 	WorkDir         string     `json:"work_dir,omitempty"`
 	IntervalSecs    int        `json:"interval_secs"`
+	WatchEnabled    bool       `json:"watch_enabled"`
+	BaseURL         string     `json:"base_url,omitempty"`
 	PID             int        `json:"pid"`
 	StartedAt       time.Time  `json:"started_at"`
 	Round           int        `json:"round"`

@@ -59,6 +59,7 @@ func init() {
 	agentCmd.AddCommand(agentStatusCmd)
 	agentCmd.AddCommand(agentStopCmd)
 	initAgentScheduleCmd()
+	initAgentWatchCmd()
 
 	agentRunCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
 	agentRunCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
@@ -96,9 +97,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		enginePath = engineName
 	}
 
-	if prompt == "" && skillPath == "" {
-		output.Error("Provide --prompt or --skill to give the worker a mission")
-		return nil
+	// prompt and skill are optional when --work-dir is provided and the
+	// project has a CLAUDE.md — Claude Code will auto-load it.
+	if prompt == "" && skillPath == "" && workDir == "" {
+		output.Warn("No --prompt, --skill, or --work-dir provided. The agent will rely on its system prompt alone.")
 	}
 
 	var skillContent string
