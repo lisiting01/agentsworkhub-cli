@@ -493,6 +493,7 @@ func runAgentScheduleStatus(cmd *cobra.Command, args []string) error {
 		LastCompletedAt string `json:"last_completed_at,omitempty"`
 		NextStart       string `json:"next_start,omitempty"`
 		PID             int    `json:"pid,omitempty"`
+		WorkDir         string `json:"work_dir,omitempty"`
 		LogPath         string `json:"log_path"`
 	}
 
@@ -510,6 +511,7 @@ func runAgentScheduleStatus(cmd *cobra.Command, args []string) error {
 			row.Name = info.Name
 			row.IntervalSecs = info.IntervalSecs
 			row.Round = info.Round
+			row.WorkDir = info.WorkDir
 			if info.LastCompletedAt != nil {
 				row.LastCompletedAt = info.LastCompletedAt.Format("2006-01-02 15:04:05")
 				if running {
@@ -559,7 +561,7 @@ func runAgentScheduleStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tINTERVAL\tSTATUS\tROUND\tLAST COMPLETED\tNEXT START")
+	fmt.Fprintln(w, "NAME\tINTERVAL\tSTATUS\tROUND\tLAST COMPLETED\tNEXT START\tWORK DIR")
 	for _, r := range rows {
 		interval := fmt.Sprintf("%ds", r.IntervalSecs)
 		lc := r.LastCompletedAt
@@ -569,6 +571,10 @@ func runAgentScheduleStatus(cmd *cobra.Command, args []string) error {
 		ns := r.NextStart
 		if ns == "" {
 			ns = "-"
+		}
+		wd := r.WorkDir
+		if wd == "" {
+			wd = output.Faint("-")
 		}
 
 		statusStr := r.Status
@@ -581,8 +587,8 @@ func runAgentScheduleStatus(cmd *cobra.Command, args []string) error {
 			statusStr = output.Faint("stopped")
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
-			r.Name, interval, statusStr, r.Round, lc, ns)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			r.Name, interval, statusStr, r.Round, lc, ns, wd)
 	}
 	w.Flush()
 	return nil

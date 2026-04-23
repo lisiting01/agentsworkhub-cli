@@ -58,7 +58,7 @@ Examples:
 
 var agentStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show running agent workers",
+	Short: "Show running agent workers (use --all for full history)",
 	RunE:  runAgentStatus,
 }
 
@@ -68,11 +68,18 @@ var agentStopCmd = &cobra.Command{
 	RunE:  runAgentStop,
 }
 
+var agentWhoamiCmd = &cobra.Command{
+	Use:   "whoami",
+	Short: "Show your agent profile and token balances (alias for `awh me`)",
+	RunE:  runMe,
+}
+
 func init() {
 	rootCmd.AddCommand(agentCmd)
 	agentCmd.AddCommand(agentRunCmd)
 	agentCmd.AddCommand(agentStatusCmd)
 	agentCmd.AddCommand(agentStopCmd)
+	agentCmd.AddCommand(agentWhoamiCmd)
 	initAgentScheduleCmd()
 	initAgentWatchCmd()
 
@@ -93,6 +100,7 @@ func init() {
 	_ = agentRunCmd.Flags().MarkHidden("_sse-event-type")
 	_ = agentRunCmd.Flags().MarkHidden("_sse-event-data")
 
+	agentStatusCmd.Flags().Bool("all", false, "Include stopped/historical workers (default: running only)")
 	agentStopCmd.Flags().String("id", "", "Worker ID to stop (default: stop all)")
 }
 
@@ -310,6 +318,8 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 }
 
 func runAgentStatus(cmd *cobra.Command, args []string) error {
+	showAll, _ := cmd.Flags().GetBool("all")
+
 	workers, err := daemon.ListWorkers()
 	if err != nil {
 		return err
@@ -336,7 +346,7 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		LogPath   string `json:"log_path"`
 	}
 
-	var statuses []workerStatus
+	var allStatuses []workerStatus
 	for _, ws := range workers {
 		info, _ := ws.ReadInfo()
 		running, pid, _ := ws.IsRunning()
@@ -356,15 +366,42 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 			st.SkillFile = info.SkillFile
 			st.StartedAt = info.StartedAt.Format(time.RFC3339)
 		}
-		statuses = append(statuses, st)
+		allStatuses = append(allStatuses, st)
+	}
+
+	// Count running workers for the summary.
+	runningCount := 0
+	for _, st := range allStatuses {
+		if st.Running {
+			runningCount++
+		}
+	}
+
+	// Filter to running-only unless --all is set.
+	statuses := allStatuses
+	if !showAll {
+		filtered := allStatuses[:0]
+		for _, st := range allStatuses {
+			if st.Running {
+				filtered = append(filtered, st)
+			}
+		}
+		statuses = filtered
 	}
 
 	if outputJSON {
 		return output.JSON(statuses)
 	}
 
+	// Summary line always shown so the user knows total context.
+	fmt.Printf("Running: %d / Total: %d", runningCount, len(allStatuses))
+	if !showAll && len(allStatuses) > runningCount {
+		fmt.Printf("  %s", output.Faint("(use --all to show stopped workers)"))
+	}
+	fmt.Println()
+
 	if len(statuses) == 0 {
-		fmt.Println(output.Faint("No agent workers found."))
+		fmt.Println(output.Faint("No running workers."))
 		return nil
 	}
 

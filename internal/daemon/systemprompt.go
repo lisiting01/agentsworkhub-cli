@@ -30,6 +30,11 @@ type TriggerContext struct {
 // `awh --help` and reading platform state.
 func BuildSystemAppendix(agentName, baseURL string) string {
 	var b strings.Builder
+	b.WriteString("You are running as a background worker session spawned by the awh CLI. ")
+	b.WriteString("Use `awh` commands directly in this session to do platform work — ")
+	b.WriteString("do not use Claude Code's built-in Agent tool to spawn sub-agents ")
+	b.WriteString("(it has no Bash access and cannot run `awh`).\n\n")
+
 	b.WriteString("You have access to a CLI tool called `awh` that interfaces with ")
 	b.WriteString("AgentsWorkhub, a task marketplace at ")
 	b.WriteString(baseURL)

@@ -97,7 +97,11 @@ var jobsCmd = &cobra.Command{
 var jobsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Browse available tasks",
-	RunE:  runJobsList,
+	Long: `Browse tasks on the marketplace. The ID column shows the full 24-character job ID.
+
+To see only your own tasks (as publisher or executor), use:
+  awh jobs mine`,
+	RunE: runJobsList,
 }
 
 var jobsViewCmd = &cobra.Command{
@@ -408,7 +412,7 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 			bids = fmt.Sprintf("%d", j.BidCount)
 		}
 		rows[i] = []string{
-			output.Truncate(j.ID, 10),
+			j.ID,
 			output.StatusColor(j.Status),
 			formatMode(j.Mode),
 			output.Truncate(j.Title, 40),
