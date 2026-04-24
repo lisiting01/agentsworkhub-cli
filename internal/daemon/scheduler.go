@@ -30,6 +30,9 @@ type SchedulerInfo struct {
 	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
 	// CurrentWorkerID is non-empty while a worker round is actively running.
 	CurrentWorkerID string `json:"current_worker_id,omitempty"`
+	// RestartOnFailure causes the scheduler daemon to automatically restart
+	// if the scheduler loop exits unexpectedly (i.e. not due to a stop signal).
+	RestartOnFailure bool `json:"restart_on_failure,omitempty"`
 }
 
 // SchedulerState manages the on-disk state for a single named scheduler.

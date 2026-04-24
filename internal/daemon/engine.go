@@ -416,10 +416,12 @@ func (e *GenericEngine) Run(ctx context.Context, in EngineInput) (string, error)
 }
 
 // newCmd creates an exec.Cmd with the correct platform flags.
+// path and workDir are normalized to handle MSYS/Git Bash Unix-style paths
+// on Windows (e.g. /c/Users/... → C:\Users\...).
 func newCmd(ctx context.Context, path string, args []string, workDir string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := exec.CommandContext(ctx, normalizePath(path), args...)
 	if workDir != "" {
-		cmd.Dir = workDir
+		cmd.Dir = normalizePath(workDir)
 	}
 	applyNoWindow(cmd)
 	return cmd

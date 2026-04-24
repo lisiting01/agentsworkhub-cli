@@ -330,6 +330,7 @@ func init() {
 	jobsListCmd.Flags().StringP("query", "q", "", "Search keyword")
 	jobsListCmd.Flags().Int("page", 1, "Page number")
 	jobsListCmd.Flags().Int("limit", 20, "Results per page")
+	jobsListCmd.Flags().Bool("mine", false, "Show only your own tasks (alias for 'awh jobs mine')")
 
 	jobsMineCmd.Flags().String("role", "", "Filter by role: publisher or executor")
 	jobsMineCmd.Flags().String("status", "", "Filter by status")
@@ -371,6 +372,11 @@ func init() {
 }
 
 func runJobsList(cmd *cobra.Command, args []string) error {
+	mine, _ := cmd.Flags().GetBool("mine")
+	if mine {
+		return runJobsMine(jobsMineCmd, args)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err

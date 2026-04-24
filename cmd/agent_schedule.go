@@ -77,6 +77,7 @@ func initAgentScheduleCmd() {
 	agentScheduleCmd.Flags().String("name", "default", "Scheduler instance name (allows multiple schedulers)")
 	agentScheduleCmd.Flags().Bool("daemon", false, "Run as a background daemon")
 	agentScheduleCmd.Flags().Bool("watch", true, "Connect to platform SSE stream for instant event-driven spawning (disable with --watch=false)")
+	agentScheduleCmd.Flags().Bool("restart-on-failure", false, "Automatically restart the scheduler if it exits unexpectedly (daemon mode only)")
 
 	agentScheduleCmd.Flags().Bool("_schedulize", false, "internal: running as scheduler daemon child")
 	agentScheduleCmd.Flags().String("_scheduler-name", "", "internal: scheduler name for daemon child")
@@ -105,6 +106,7 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	daemonMode, _ := cmd.Flags().GetBool("daemon")
 	watchMode, _ := cmd.Flags().GetBool("watch")
+	restartOnFailure, _ := cmd.Flags().GetBool("restart-on-failure")
 	isChild, _ := cmd.Flags().GetBool("_schedulize")
 	childName, _ := cmd.Flags().GetString("_scheduler-name")
 
@@ -133,17 +135,18 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	}
 
 	info := &daemon.SchedulerInfo{
-		Name:         name,
-		Engine:       engineName,
-		EnginePath:   enginePath,
-		EngineModel:  engineModel,
-		Prompt:       prompt,
-		SkillFile:    skillPath,
-		WorkDir:      workDir,
-		IntervalSecs: intervalSecs,
-		WatchEnabled: watchMode,
-		PID:          os.Getpid(),
-		StartedAt:    time.Now(),
+		Name:             name,
+		Engine:           engineName,
+		EnginePath:       enginePath,
+		EngineModel:      engineModel,
+		Prompt:           prompt,
+		SkillFile:        skillPath,
+		WorkDir:          workDir,
+		IntervalSecs:     intervalSecs,
+		WatchEnabled:     watchMode,
+		RestartOnFailure: restartOnFailure,
+		PID:              os.Getpid(),
+		StartedAt:        time.Now(),
 	}
 
 	if !isChild && daemonMode {
@@ -159,11 +162,39 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	}
 	defer ss.ClearPID()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	logf := func(format string, a ...any) {
+		fmt.Fprintf(os.Stderr, "[scheduler:%s] "+format+"\n", append([]any{info.Name}, a...)...)
+	}
 
-	runSchedulerLoop(ctx, ss, info)
-	return nil
+	backoff := 5 * time.Second
+	const maxBackoff = 5 * time.Minute
+
+	for {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		runSchedulerLoop(ctx, ss, info)
+		signalled := ctx.Err() != nil
+		cancel()
+
+		if signalled {
+			// Graceful stop via signal — do not restart.
+			return nil
+		}
+		if !info.RestartOnFailure {
+			return nil
+		}
+		// Unexpected exit: restart with exponential backoff.
+		logf("scheduler loop exited unexpectedly, restarting in %s...", backoff)
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		// Re-read state so round count etc. are preserved across restarts.
+		if fresh, err := ss.ReadInfo(); err == nil && fresh != nil {
+			fresh.RestartOnFailure = info.RestartOnFailure
+			info = fresh
+		}
+	}
 }
 
 // startSchedulerDaemon re-execs this binary as a detached background process.
@@ -199,6 +230,9 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 	childArgs = append(childArgs, "--name", info.Name)
 	if !info.WatchEnabled {
 		childArgs = append(childArgs, "--watch=false")
+	}
+	if info.RestartOnFailure {
+		childArgs = append(childArgs, "--restart-on-failure")
 	}
 	if baseURLOverride != "" {
 		childArgs = append(childArgs, "--base-url", baseURLOverride)
