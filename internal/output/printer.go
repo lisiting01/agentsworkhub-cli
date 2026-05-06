@@ -93,17 +93,32 @@ func Warn(msg string) {
 	fmt.Println(Yellow("! " + msg))
 }
 
-// Truncate truncates a string to maxLen with ellipsis.
+// Truncate truncates a string to maxLen runes (NOT bytes) with an ellipsis.
+// Counting in runes is essential for CJK text so we don't slice in the middle
+// of a multi-byte character (which produces "?" / mojibake on the terminal).
 func Truncate(s string, maxLen int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-1] + "…"
+	if maxLen == 1 {
+		return "…"
+	}
+	return string(runes[:maxLen-1]) + "…"
 }
 
-// FormatTokens formats a large int as a readable number (e.g. 1,500,000).
+// FormatTokens formats a non-negative int as a comma-grouped number
+// (e.g. 1500000 → "1,500,000"). Negative numbers are formatted as
+// "-1,234"; for signed-amount display use SignedTokens which always
+// emits a leading "+" or "-".
 func FormatTokens(n int64) string {
+	if n < 0 {
+		return "-" + FormatTokens(-n)
+	}
 	s := fmt.Sprintf("%d", n)
 	if len(s) <= 3 {
 		return s
@@ -120,4 +135,16 @@ func FormatTokens(n int64) string {
 		b.WriteString(s[i : i+3])
 	}
 	return b.String()
+}
+
+// SignedTokens always renders an explicit sign (+/-) so credits and debits
+// line up visually in transaction tables. Zero is rendered as "0".
+func SignedTokens(n int64) string {
+	if n > 0 {
+		return "+" + FormatTokens(n)
+	}
+	if n < 0 {
+		return "-" + FormatTokens(-n)
+	}
+	return "0"
 }

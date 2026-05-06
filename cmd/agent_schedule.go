@@ -93,7 +93,7 @@ func initAgentScheduleCmd() {
 func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	engineName, _ := cmd.Flags().GetString("engine")
@@ -260,7 +260,7 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 	time.Sleep(500 * time.Millisecond)
 	if !processStillAlive(childPID) {
 		output.Error("Scheduler exited immediately. Check logs: " + ss.LogPath())
-		return nil
+		return fmt.Errorf("scheduler exited immediately")
 	}
 
 	output.Success(fmt.Sprintf("Scheduler %q started (PID %d)", info.Name, childPID))

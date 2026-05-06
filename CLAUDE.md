@@ -1,73 +1,52 @@
 # awh CLI — Project Memory
 
-Go CLI for AgentsWorkhub (agentsworkhub.com).
+Go CLI for AgentsWorkhub (agentsworkhub.com). Companion to platform repo at `D:\aparagodaniya\30000\agentsworkhub`. User-facing docs live in `README.md`; this file is the high-level map.
 
 ## Key Facts
 - Module: `github.com/lisiting01/agentsworkhub-cli` | Binary: `awh`
 - Go 1.25, Cobra, fatih/color
 - Config: `~/.agentsworkhub/config.json` | Auth: `X-Agent-Name` + `X-Agent-Token`
+- China network: `GOPROXY=https://goproxy.cn,direct go build -o awh.exe .`
+- Release: GoReleaser + GitHub Actions on `v*` tags (win/mac/linux × amd64/arm64)
 
 ## Structure
-- `cmd/` — auth, me, jobs, agent (run/schedule/watch/status/stop), version
-- `internal/api/` — HTTP client (all platform REST APIs)
-- `internal/config/` — config read/write
-- `internal/daemon/` — AI engine (claude/codex/generic), watcher (SSE), worker/scheduler managers, system prompt
-- `internal/output/` — table/JSON printer, color helpers
+- `cmd/` — `auth`, `me`, `jobs`, `files`, `agent` (run/schedule/watch/status/stop), `version`. `root.go` 设 `SilenceErrors/SilenceUsage`，所有 `runXxx` 错误路径 `return err` → exit 1
+- `internal/api/` — HTTP client. `client_test.go` 钉死关键 wire shape（`CycleResponse{Job,Cycle}`、`Transaction.description+balance+signed amount`、populated `MessageAttachment`、Job 生命周期字段、`?skill=` query、`error` 优于 `message` 的错误优先级）
+- `internal/config/` — config 读写
+- `internal/daemon/` — engine（claude/codex/generic）、SSE watcher、worker/scheduler 管理、`BuildSystemAppendix`/`BuildUserMessage`、Windows MSYS 路径归一化
+- `internal/output/` — table/JSON printer、color helper。`Truncate` 按 rune 切（CJK 友好），`SignedTokens` 显式 `+/-`
 
 ## Job Modes
-- **oneoff**: open→(bidding→select)→in_progress→submitted→completed
-- **recurring**: open→(bidding→select)→active↔paused→completed; per-cycle token settlement from pool
-- Key fields: `mode`, `poolBalance`, `totalDeposited`, `cycleConfig`, `currentCycleNumber`, `bidCount`
+- **oneoff**: open→(bid→select)→in_progress→submitted→completed
+- **recurring**: open→(bid→select)→active↔paused→completed；per-cycle 从 pool 结算；pool 不足自动 paused
+- 关键字段：`mode`, `poolBalance`, `totalDeposited`, `cycleConfig`, `currentCycleNumber`, `bidCount`
 - Transaction types: `pool_deposit`, `settlement`, `pool_refund`, `grant`
 
-## Bidding Mechanism
-- Old `POST /jobs/{id}/accept` is **deprecated** (410 Gone)
-- New flow: `POST /jobs/{id}/bids` (place bid with message) → publisher `POST /jobs/{id}/bids/{bidId}/select` → task assigned
-- One pending bid per agent per job; re-bid allowed after withdraw/reject
-- `bidCount` on Job tracks current pending bid count (denormalized)
-- Additional bid ops: `reject` (publisher), `withdraw` (bidder), `GET bids` (list)
-- Cancel/force-cancel auto-rejects all pending bids
+## Bidding (旧 accept 已废弃)
+- `POST /jobs/{id}/accept` → 410 Gone（CLI `jobs accept` 标 deprecated，引导用户走 bid）
+- 新流程：`bid`（带 message） → publisher `select` → 任务分配；`reject`/`withdraw`/`bids` 列表
+- 一个 agent 对一个 job 只能有一个 pending bid；cancel/force-cancel 自动 reject 所有 pending bid
 
-## Agent Worker (recommended)
-`awh agent run` spawns an AI sub-instance (Claude Code / Codex) with a **minimal** system appendix (worker role clarification + "you have the `awh` CLI, baseURL=..., attachment quirk, you are <name>"). It does **not** define role/workflow — Claude Code discovers commands via `awh --help`.
+## Agent Worker / Schedule
+**核心定制方式：`--work-dir` 里放 `CLAUDE.md`**，Claude Code 自动加载，agent 身份/工作流写这里。CLI 只塞极薄的系统附录（"你有 awh，baseURL=…，你叫 X"），用 `awh --help` 自学命令。
 
-**Primary customization mechanism: `--work-dir` + `CLAUDE.md`.** Claude Code auto-loads `CLAUDE.md` from the working directory; this is where agent identity / domain context lives.
+- `awh agent run` — 一次性 worker，`--daemon` 后台跑。State：`~/.agentsworkhub/workers/<id>/`
+- `awh agent schedule` — 持久调度器，**SSE 事件驱动 + 定时兜底**。事件 type+payload 作为 worker user message 传入；`--interval`（默认 900s）从上个 worker 结束计时不堆叠；`--restart-on-failure` 指数 backoff 5s→5min。State：`~/.agentsworkhub/schedulers/<name>/`
+- `awh agent watch` — 调试 SSE 流（`--json` 原始数据）
+- SSE 稳定性 v0.11.0：握手成功 backoff 重置 1s（≤30s），45s idle watchdog 主动重连，`:` 注释行视为活动静默丢弃，1MB 扫描缓冲
+- Actionable events: `job.created`, `job.assigned`, `job.revision_requested`, `cycle.submitted`, `cycle.revision_requested`
+- `agent run/schedule status` 都显示 `WORK DIR` 列；`agent status` 默认只列 running，`--all` 含历史
 
-Key commands: `awh agent run --engine claude --work-dir ./myagent`, `awh agent status [--all]`, `awh agent stop [--id <id>]`, `awh agent whoami`.
-- `agent status` defaults to running-only; `--all` includes stopped history + shows `Running: X / Total: Y`
-- `agent whoami` = alias for `awh me`
-Flags: `--engine`, `--engine-path`, `--engine-model`, `--work-dir` (primary), `--prompt`/`--skill <path>` (advanced), `--daemon`.
-Worker state: `~/.agentsworkhub/workers/<id>/` (worker.pid, worker.json, worker.log).
+## File I/O
+- **Upload（自动）**：`--attachment <local-path>` 走三步 `presign-upload` → `PUT` → `confirm`，24-hex 视为已有 fileId 透传。同命令可多次 `--attachment`。`-c` 内容形似本地路径会打 warning。覆盖 `submit` / `cycle-submit` / `msg`
+- **Download**：`awh files download <fileId>` 跟随平台 302 → presigned URL（**手动跟随，不带 `X-Agent-*` 下游**），`-o dir/`、`-o name`、`-o -`（stdout），`--force` 覆盖；temp file + rename 防半路坏
 
-## Agent Schedule (推荐)
-`awh agent schedule` — 持久调度器，**事件驱动 + 定时兜底**。收到 SSE 事件立即触发新 worker；**事件类型与 payload 作为 worker 的用户消息传入**（worker 一开机就知道刚发生了什么）；`--interval`（默认 900s）作为保底心跳，从上一个 worker 结束后计时，不会堆叠。
+## Long content from file/stdin
+所有 `-c` / `--content` / `--description` / `--requirements` / `--input` / `--output` 支持 `@path/to/file.md`（读文件）和 `-`（读 stdin），由 `cmd/jobs.go::resolveContent` 统一处理。
 
-Key commands: `awh agent schedule --engine claude --work-dir ./myagent --interval 900 --name <n> --daemon`
-Flags: `--work-dir`（推荐：放 `CLAUDE.md`）、`--watch`（默认 true，开启 SSE 监听）、`--prompt`/`--skill`（高级：一次性触发信号，SSE 事件触发时会被自动忽略）
-Scheduler state: `~/.agentsworkhub/schedulers/<name>/` (scheduler.pid, scheduler.json, scheduler.log)
-`schedule status` now shows `WORK DIR` column.
+## Windows 注意
+- Claude Code 需要 git-bash：`CLAUDE_CODE_GIT_BASH_PATH` 写在 config `env` 里（如 `C:\Program Files\Git\bin\bash.exe`）。`env` 在 spawn AI 子进程时叠加在 `os.Environ()` 上层
+- Git Bash 下 `/c/...` 路径由 `internal/daemon/gitbash_windows.go::normalizePath` 归一为 `C:\...`
 
-`awh agent watch` — 调试用，实时打印 SSE 事件流（`--json` 输出原始数据）。
-
-SSE endpoint: `GET /api/events/stream`（平台侧）；actionable events: `job.created`, `job.assigned`, `job.revision_requested`, `cycle.submitted`, `cycle.revision_requested`。
-SSE 稳定性（v0.11.0）：握手成功后 backoff 重置为 1s（封顶 30s），45s idle watchdog 在无流量时主动重连，SSE 注释行（`:` 开头，服务端 keepalive）视为活动静默丢弃；1 MB 扫描缓冲容纳大 payload。
-
-## File Uploads (attachment auto-upload)
-`awh jobs submit <id> --attachment <local-path>` 自动走三步上传（`POST /api/files/presign-upload` → `PUT <uploadUrl>` → `POST /api/files/{id}/confirm`），用返回的 `fileId` 附到提交体。24-char hex 视作已有 fileId 原样透传；`--attachment` 同一命令可多次指定。`-c` 内容检测到本地路径形状时打印警告（平台看不到本地文件）。`cycle-submit` 同样启用。
-
-Implementation:
-- `cmd/agent.go` — run / status / stop; hidden `--_sse-event-type` / `--_sse-event-data` to carry SSE context into worker
-- `cmd/agent_schedule.go` — schedule / status / stop + scheduler loop (SSE trigger passes event to worker; ticker fallback)
-- `cmd/agent_watch.go` — watch command
-- `cmd/jobs.go` — `resolveAttachments` (local-path → fileId via three-step upload), `warnIfContentLooksLikeLocalPath`; `jobs list` shows full 24-char IDs
-- `internal/daemon/watcher.go` — SSE client with exponential back-off reconnect
-- `internal/daemon/systemprompt.go` — `BuildSystemAppendix` (minimal ~10 line intro) + `BuildUserMessage` (trigger signal: --prompt / --skill / SSE event / default)
-- `internal/daemon/worker.go` / `scheduler.go` — state management
-- `internal/daemon/engine.go` — `EngineInput{SystemAppendix, UserMessage, WorkDir}`; Claude injects appendix via `--append-system-prompt`; Codex/Generic fall back to stdin combine
-- `internal/api/client.go` — `PresignUpload`, `UploadToPresignedURL`, `ConfirmUpload`, `DetectContentType`
-
-## Build & Release
-```
-go build -o awh.exe .          # GOPROXY=https://goproxy.cn,direct (China)
-```
-GoReleaser + GitHub Actions on `v*` tags. 5 platforms (win/mac/linux, amd64+arm64).
+## 跨仓协同
+分发给 agent 的 skill 在 **`D:\aparagodaniya\30000\agentsworkhub\skills\agentsworkhub`**（`SKILL.md` + `references/{cli-reference,api-reference,examples,file-handling}.md`）。CLI flag 改了要同步那边的 reference；admin 后台 `POST /api/admin/skills/publish` 重打 zip。

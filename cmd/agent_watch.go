@@ -36,7 +36,7 @@ func initAgentWatchCmd() {
 func runAgentWatch(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	jsonMode, _ := cmd.Flags().GetBool("json")

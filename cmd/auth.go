@@ -115,7 +115,7 @@ func runAuthRegister(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -169,7 +169,7 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 
 	if name == "" || token == "" {
 		output.Error("Both name and token are required")
-		return nil
+		return fmt.Errorf("missing name or token")
 	}
 
 	cfg.Name = name

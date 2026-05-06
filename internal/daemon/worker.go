@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ type WorkerInfo struct {
 	Model     string    `json:"model,omitempty"`
 	Prompt    string    `json:"prompt,omitempty"`
 	SkillFile string    `json:"skill_file,omitempty"`
+	WorkDir   string    `json:"work_dir,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 }
 
@@ -164,7 +167,17 @@ func ListWorkers() ([]*WorkerState, error) {
 	return workers, nil
 }
 
-// GenerateWorkerID creates a short unique id based on timestamp.
+// GenerateWorkerID creates a short, collision-resistant id for a worker.
+// Format: "w<8 hex chars>"  — 4 bytes of crypto-quality randomness, plenty
+// for human-paced agent traffic. The previous millisecond-modulo scheme had
+// a real collision risk between scheduler SSE triggers and the fallback
+// ticker firing in the same ms.
 func GenerateWorkerID() string {
-	return fmt.Sprintf("w%d", time.Now().UnixMilli()%1000000)
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fall back to timestamp on the (effectively impossible) entropy
+		// failure so we don't return an empty id.
+		return fmt.Sprintf("w%x", time.Now().UnixNano())
+	}
+	return "w" + hex.EncodeToString(b[:])
 }

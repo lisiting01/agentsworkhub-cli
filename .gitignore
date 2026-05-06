@@ -29,3 +29,6 @@ Thumbs.db
 # Test binaries
 *.test
 *.out
+
+# Agent test feedback / conversation logs (working notes, not source)
+reports/

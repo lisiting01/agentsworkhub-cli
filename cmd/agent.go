@@ -107,7 +107,7 @@ func init() {
 func runAgentRun(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	engineName, _ := cmd.Flags().GetString("engine")
@@ -131,7 +131,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		content, err := daemon.LoadSkillFile(skillPath)
 		if err != nil {
 			output.Error(err.Error())
-			return nil
+			return err
 		}
 		skillContent = content
 	}
@@ -148,7 +148,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	streamEng, ok := eng.(daemon.StreamingEngine)
 	if !ok {
 		output.Error(fmt.Sprintf("Engine %q does not support streaming mode", engineName))
-		return nil
+		return fmt.Errorf("engine %q does not support streaming", engineName)
 	}
 
 	if !isDaemonChild && daemonMode {
@@ -173,6 +173,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		Model:     engineModel,
 		Prompt:    prompt,
 		SkillFile: skillPath,
+		WorkDir:   workDir,
 		StartedAt: time.Now(),
 	}
 	if err := ws.WriteInfo(info); err != nil {
@@ -208,7 +209,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	}, outDest)
 	if err != nil {
 		output.Error(fmt.Sprintf("Failed to start AI engine: %v", err))
-		return nil
+		return err
 	}
 
 	info.PID = os.Getpid()
@@ -280,6 +281,7 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 	if err := ws.WritePID(childPID); err != nil {
 		return fmt.Errorf("write pid: %w", err)
 	}
+	workDir, _ := cobraCmd.Flags().GetString("work-dir")
 	info := &daemon.WorkerInfo{
 		ID:        workerID,
 		PID:       childPID,
@@ -287,6 +289,7 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 		Model:     engineModel,
 		Prompt:    prompt,
 		SkillFile: skillPath,
+		WorkDir:   workDir,
 		StartedAt: time.Now(),
 	}
 	_ = ws.WriteInfo(info)
@@ -294,7 +297,7 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 	time.Sleep(500 * time.Millisecond)
 	if alive := processStillAlive(childPID); !alive {
 		output.Error("Worker exited immediately. Check logs: " + ws.LogPath())
-		return nil
+		return fmt.Errorf("worker exited immediately")
 	}
 
 	output.Success(fmt.Sprintf("Agent worker started (ID: %s, PID: %d)", workerID, childPID))
@@ -303,14 +306,13 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 		fmt.Printf("  Model:  %s\n", engineModel)
 	}
 	if prompt != "" {
-		truncated := prompt
-		if len(truncated) > 80 {
-			truncated = truncated[:80] + "..."
-		}
-		fmt.Printf("  Prompt: %s\n", truncated)
+		fmt.Printf("  Prompt: %s\n", output.Truncate(prompt, 80))
 	}
 	if skillPath != "" {
 		fmt.Printf("  Skill:  %s\n", skillPath)
+	}
+	if workDir != "" {
+		fmt.Printf("  WorkDir: %s\n", workDir)
 	}
 	fmt.Printf("  Logs:   %s\n", ws.LogPath())
 	fmt.Printf("  Stop:   awh agent stop --id %s\n", workerID)
@@ -342,6 +344,7 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		Model     string `json:"model,omitempty"`
 		Prompt    string `json:"prompt,omitempty"`
 		SkillFile string `json:"skill_file,omitempty"`
+		WorkDir   string `json:"work_dir,omitempty"`
 		StartedAt string `json:"started_at"`
 		LogPath   string `json:"log_path"`
 	}
@@ -364,6 +367,7 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 			st.Model = info.Model
 			st.Prompt = info.Prompt
 			st.SkillFile = info.SkillFile
+			st.WorkDir = info.WorkDir
 			st.StartedAt = info.StartedAt.Format(time.RFC3339)
 		}
 		allStatuses = append(allStatuses, st)
@@ -416,14 +420,13 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    Model:   %s\n", st.Model)
 		}
 		if st.Prompt != "" {
-			truncated := st.Prompt
-			if len(truncated) > 60 {
-				truncated = truncated[:60] + "..."
-			}
-			fmt.Printf("    Prompt:  %s\n", truncated)
+			fmt.Printf("    Prompt:  %s\n", output.Truncate(st.Prompt, 60))
 		}
 		if st.SkillFile != "" {
 			fmt.Printf("    Skill:   %s\n", st.SkillFile)
+		}
+		if st.WorkDir != "" {
+			fmt.Printf("    WorkDir: %s\n", st.WorkDir)
 		}
 		fmt.Printf("    Started: %s\n", st.StartedAt)
 		fmt.Printf("    Logs:    %s\n", st.LogPath)

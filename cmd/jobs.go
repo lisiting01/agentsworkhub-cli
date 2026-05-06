@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,33 @@ import (
 	"github.com/lisiting01/agentsworkhub-cli/internal/output"
 	"github.com/spf13/cobra"
 )
+
+// resolveContent expands shorthand notations for `-c` / `--content` style
+// flags so long messages don't have to live on the command line:
+//
+//   - "-"            → read all of stdin
+//   - "@/path/to.md" → read the file's contents
+//   - anything else  → returned verbatim
+//
+// "@" prefix matches what gh / curl use; the bare "-" mirrors most Unix tools.
+func resolveContent(raw string) (string, error) {
+	if raw == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		return strings.TrimRight(string(data), "\r\n"), nil
+	}
+	if strings.HasPrefix(raw, "@") {
+		path := strings.TrimPrefix(raw, "@")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read content file %s: %w", path, err)
+		}
+		return strings.TrimRight(string(data), "\r\n"), nil
+	}
+	return raw, nil
+}
 
 // hexID24 matches a 24-char hex string — the shape of a Mongo ObjectID and
 // thus of a platform fileId. Used to decide whether an --attachment value is
@@ -119,10 +147,11 @@ var jobsMineCmd = &cobra.Command{
 
 var jobsAcceptCmd = &cobra.Command{
 	Use:        "accept <jobId>",
-	Short:      "[DEPRECATED] Use 'bid' instead — accept endpoint returns 410",
+	Short:      "[REMOVED] Use 'bid' instead",
 	Args:       cobra.ExactArgs(1),
 	Deprecated: "use 'awh jobs bid <jobId> --message \"...\"' to place a bid instead",
 	RunE:       runJobsAccept,
+	Hidden:     true,
 }
 
 var jobsBidCmd = &cobra.Command{
@@ -309,13 +338,13 @@ func init() {
 	jobsCmd.AddCommand(jobsCreateCmd)
 
 	jobsCreateCmd.Flags().String("title", "", "Task title (required)")
-	jobsCreateCmd.Flags().String("description", "", "Task description (required)")
+	jobsCreateCmd.Flags().String("description", "", "Task description (required; '-' = stdin, '@file' = load file)")
 	jobsCreateCmd.Flags().Int64("reward-amount", 0, "Token reward amount per task/cycle (required)")
 	jobsCreateCmd.Flags().String("reward-model", "claude-sonnet-4-6", "Model ID for reward tokens")
 	jobsCreateCmd.Flags().String("mode", "oneoff", "Task mode: oneoff or recurring")
-	jobsCreateCmd.Flags().String("requirements", "", "Requirements / prerequisites")
-	jobsCreateCmd.Flags().String("input", "", "Input description")
-	jobsCreateCmd.Flags().String("output", "", "Expected output description")
+	jobsCreateCmd.Flags().String("requirements", "", "Requirements / prerequisites ('-' = stdin, '@file' = load file)")
+	jobsCreateCmd.Flags().String("input", "", "Input description ('-' = stdin, '@file' = load file)")
+	jobsCreateCmd.Flags().String("output", "", "Expected output description ('-' = stdin, '@file' = load file)")
 	jobsCreateCmd.Flags().String("duration", "", "Estimated duration (e.g. '3 days')")
 	jobsCreateCmd.Flags().String("skills", "", "Required skills, comma-separated (e.g. 'go,cli')")
 	jobsCreateCmd.Flags().Int("interval-days", 0, "Cycle interval in days (required for recurring mode)")
@@ -327,7 +356,8 @@ func init() {
 
 	jobsListCmd.Flags().String("status", "open", "Filter by status (open/all/in_progress/active/paused/completed/cancelled)")
 	jobsListCmd.Flags().String("mode", "", "Filter by mode: oneoff or recurring")
-	jobsListCmd.Flags().StringP("query", "q", "", "Search keyword")
+	jobsListCmd.Flags().StringP("query", "q", "", "Search keyword (matches title/description)")
+	jobsListCmd.Flags().String("skill", "", "Filter by required skill (case-insensitive substring)")
 	jobsListCmd.Flags().Int("page", 1, "Page number")
 	jobsListCmd.Flags().Int("limit", 20, "Results per page")
 	jobsListCmd.Flags().Bool("mine", false, "Show only your own tasks (alias for 'awh jobs mine')")
@@ -338,25 +368,26 @@ func init() {
 	jobsMineCmd.Flags().Int("page", 1, "Page number")
 	jobsMineCmd.Flags().Int("limit", 20, "Results per page")
 
-	jobsSubmitCmd.Flags().StringP("content", "c", "", "Submission message content")
+	jobsSubmitCmd.Flags().StringP("content", "c", "", "Submission message content (use '-' to read stdin or '@path/to/file.md' to load from a file)")
 	jobsSubmitCmd.Flags().StringSlice("attachment", nil, "Local file path(s) or existing fileId(s) to attach (repeatable). Local paths are auto-uploaded")
 
-	jobsReviseCmd.Flags().StringP("content", "c", "", "Revision request message (required)")
+	jobsReviseCmd.Flags().StringP("content", "c", "", "Revision request message (required; '-' = stdin, '@file' = load file)")
 	_ = jobsReviseCmd.MarkFlagRequired("content")
 
 	jobsMessagesCmd.Flags().Int("page", 1, "Page number")
 	jobsMessagesCmd.Flags().Int("limit", 50, "Results per page")
 
 	jobsMsgCmd.Flags().StringP("type", "t", "message", "Message type: brief, standards, message")
-	jobsMsgCmd.Flags().StringP("content", "c", "", "Message content")
+	jobsMsgCmd.Flags().StringP("content", "c", "", "Message content (use '-' for stdin or '@file' to load from disk)")
+	jobsMsgCmd.Flags().StringSlice("attachment", nil, "Local file path(s) or existing fileId(s) to attach (repeatable). Local paths are auto-uploaded")
 
 	jobsCyclesCmd.Flags().Int("page", 1, "Page number")
 	jobsCyclesCmd.Flags().Int("limit", 20, "Results per page")
 
-	jobsCycleSubmitCmd.Flags().StringP("content", "c", "", "Deliverable content")
+	jobsCycleSubmitCmd.Flags().StringP("content", "c", "", "Deliverable content (use '-' for stdin or '@file' to load from disk)")
 	jobsCycleSubmitCmd.Flags().StringSlice("attachment", nil, "Local file path(s) or existing fileId(s) to attach (repeatable). Local paths are auto-uploaded")
 
-	jobsCycleReviseCmd.Flags().StringP("content", "c", "", "Revision feedback (required)")
+	jobsCycleReviseCmd.Flags().StringP("content", "c", "", "Revision feedback (required; '-' = stdin, '@file' = load file)")
 	_ = jobsCycleReviseCmd.MarkFlagRequired("content")
 
 	jobsTopUpCmd.Flags().String("model", "claude-sonnet-4-6", "Model ID to top up")
@@ -388,14 +419,15 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 	status, _ := cmd.Flags().GetString("status")
 	mode, _ := cmd.Flags().GetString("mode")
 	q, _ := cmd.Flags().GetString("query")
+	skill, _ := cmd.Flags().GetString("skill")
 	page, _ := cmd.Flags().GetInt("page")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	result, err := client.ListJobs(status, mode, q, page, limit)
+	result, err := client.ListJobs(status, mode, q, skill, page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -446,7 +478,7 @@ func runJobsView(cmd *cobra.Command, args []string) error {
 	job, err := client.GetJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -460,7 +492,7 @@ func runJobsView(cmd *cobra.Command, args []string) error {
 func runJobsMine(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	role, _ := cmd.Flags().GetString("role")
@@ -473,7 +505,7 @@ func runJobsMine(cmd *cobra.Command, args []string) error {
 	result, err := client.MyJobs(role, status, mode, page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -512,13 +544,14 @@ func runJobsAccept(cmd *cobra.Command, args []string) error {
 	output.Warn("The accept endpoint has been deprecated (410 Gone).")
 	fmt.Println("  Use the bidding flow instead:")
 	fmt.Printf("    awh jobs bid %s --message \"your bid message\"\n\n", args[0])
-	return nil
+	// Intentionally exit non-zero so scripts that still call `accept` notice.
+	return fmt.Errorf("'accept' has been removed; use 'bid' instead")
 }
 
 func runJobsBid(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	message, _ := cmd.Flags().GetString("message")
@@ -527,7 +560,7 @@ func runJobsBid(cmd *cobra.Command, args []string) error {
 	bid, err := client.PlaceBid(args[0], message)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -557,7 +590,7 @@ func runJobsBids(cmd *cobra.Command, args []string) error {
 	result, err := client.ListBids(args[0], status, page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -599,14 +632,14 @@ func runJobsBids(cmd *cobra.Command, args []string) error {
 func runJobsSelectBid(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.SelectBid(args[0], args[1])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -622,14 +655,14 @@ func runJobsSelectBid(cmd *cobra.Command, args []string) error {
 func runJobsRejectBid(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	err = client.RejectBid(args[0], args[1])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	output.Success("Bid rejected")
@@ -640,14 +673,14 @@ func runJobsRejectBid(cmd *cobra.Command, args []string) error {
 func runJobsWithdrawBid(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	err = client.WithdrawBid(args[0], args[1])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	output.Success("Bid withdrawn")
@@ -673,15 +706,20 @@ func bidStatusColor(status string) string {
 func runJobsSubmit(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
-	content, _ := cmd.Flags().GetString("content")
+	rawContent, _ := cmd.Flags().GetString("content")
+	content, err := resolveContent(rawContent)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
 	attachments, _ := cmd.Flags().GetStringSlice("attachment")
 
 	if content == "" && len(attachments) == 0 {
 		output.Error("Provide at least --content or --attachment")
-		return nil
+		return fmt.Errorf("missing content or attachment")
 	}
 
 	warnIfContentLooksLikeLocalPath(content)
@@ -691,7 +729,7 @@ func runJobsSubmit(cmd *cobra.Command, args []string) error {
 	resolvedAttachments, err := resolveAttachments(client, attachments)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	job, err := client.SubmitJob(args[0], api.SubmitRequest{
@@ -700,7 +738,7 @@ func runJobsSubmit(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -715,14 +753,14 @@ func runJobsSubmit(cmd *cobra.Command, args []string) error {
 func runJobsCancel(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.CancelJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -737,14 +775,14 @@ func runJobsCancel(cmd *cobra.Command, args []string) error {
 func runJobsComplete(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.CompleteJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -759,14 +797,14 @@ func runJobsComplete(cmd *cobra.Command, args []string) error {
 func runJobsWithdraw(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.WithdrawJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -781,16 +819,21 @@ func runJobsWithdraw(cmd *cobra.Command, args []string) error {
 func runJobsRevise(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
-	content, _ := cmd.Flags().GetString("content")
+	rawContent, _ := cmd.Flags().GetString("content")
+	content, err := resolveContent(rawContent)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.RequestRevision(args[0], api.RevisionRequest{Content: content})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -818,7 +861,7 @@ func runJobsMessages(cmd *cobra.Command, args []string) error {
 	result, err := client.GetMessages(args[0], page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -833,13 +876,40 @@ func runJobsMessages(cmd *cobra.Command, args []string) error {
 		if m.CreatedAt != nil {
 			date = m.CreatedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Printf("%s  %s  %s\n",
+		header := fmt.Sprintf("%s  %s  %s",
 			output.Faint(date),
 			output.Bold(m.SenderName),
 			output.Yellow("["+m.Type+"]"),
 		)
+		if m.CycleNumber > 0 {
+			header += fmt.Sprintf("  %s", output.Cyan(fmt.Sprintf("cycle #%d", m.CycleNumber)))
+		}
+		fmt.Println(header)
 		if m.Content != "" {
 			fmt.Printf("  %s\n", m.Content)
+		}
+		for _, att := range m.Attachments {
+			label := att.OriginalName
+			if label == "" {
+				label = att.ID
+			}
+			meta := []string{}
+			if att.Size > 0 {
+				meta = append(meta, formatBytes(att.Size))
+			}
+			if att.MimeType != "" {
+				meta = append(meta, att.MimeType)
+			}
+			suffix := ""
+			if len(meta) > 0 {
+				suffix = " " + output.Faint("("+strings.Join(meta, ", ")+")")
+			}
+			fmt.Printf("  %s %s  %s%s\n",
+				output.Cyan("[attachment]"),
+				output.Bold(label),
+				output.Faint("id="+att.ID),
+				suffix,
+			)
 		}
 		fmt.Println()
 	}
@@ -849,25 +919,54 @@ func runJobsMessages(cmd *cobra.Command, args []string) error {
 func runJobsMsg(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	msgType, _ := cmd.Flags().GetString("type")
-	content, _ := cmd.Flags().GetString("content")
+	rawContent, _ := cmd.Flags().GetString("content")
+	content, err := resolveContent(rawContent)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
+	attachments, _ := cmd.Flags().GetStringSlice("attachment")
 
-	if content == "" {
-		output.Error("Provide --content")
-		return nil
+	// Reject delivery / revision_request explicitly so users don't bypass
+	// /submit and /request-revision (which also do state transitions). The
+	// platform would also reject them, but failing fast is friendlier.
+	switch msgType {
+	case "brief", "standards", "message":
+		// ok
+	case "delivery", "revision_request":
+		output.Error(fmt.Sprintf("type %q is created by `awh jobs submit` / `awh jobs revise`, not `msg`", msgType))
+		return fmt.Errorf("invalid message type for msg command: %s", msgType)
+	default:
+		output.Error(fmt.Sprintf("unknown message type %q (expected brief, standards, or message)", msgType))
+		return fmt.Errorf("invalid message type: %s", msgType)
 	}
 
+	if content == "" && len(attachments) == 0 {
+		output.Error("Provide at least --content or --attachment")
+		return fmt.Errorf("missing content or attachment")
+	}
+
+	warnIfContentLooksLikeLocalPath(content)
+
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	resolvedAttachments, err := resolveAttachments(client, attachments)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
+
 	msg, err := client.SendMessage(args[0], api.SendMessageRequest{
-		Type:    msgType,
-		Content: content,
+		Type:        msgType,
+		Content:     content,
+		Attachments: resolvedAttachments,
 	})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -919,6 +1018,38 @@ func printJob(job *api.Job) {
 		if len(job.PoolBalance) > 0 {
 			fmt.Printf("  %-20s%s\n", output.Bold("Pool Balance:"), formatPoolBalance(job.PoolBalance))
 		}
+		if len(job.TotalDeposited) > 0 {
+			fmt.Printf("  %-20s%s\n", output.Bold("Total Deposited:"), formatRewards(job.TotalDeposited))
+		}
+	}
+
+	// Lifecycle timestamps — only print the ones set so we don't pad with
+	// noise on early-state jobs.
+	timeline := [][2]string{}
+	if job.CreatedAt != nil {
+		timeline = append(timeline, [2]string{"Created", job.CreatedAt.Format("2006-01-02 15:04")})
+	}
+	if job.AcceptedAt != nil {
+		timeline = append(timeline, [2]string{"Assigned", job.AcceptedAt.Format("2006-01-02 15:04")})
+	}
+	if job.SubmittedAt != nil {
+		timeline = append(timeline, [2]string{"Submitted", job.SubmittedAt.Format("2006-01-02 15:04")})
+	}
+	if job.RevisionRequestedAt != nil {
+		timeline = append(timeline, [2]string{"Revision req.", job.RevisionRequestedAt.Format("2006-01-02 15:04")})
+	}
+	if job.CompletedAt != nil {
+		timeline = append(timeline, [2]string{"Completed", job.CompletedAt.Format("2006-01-02 15:04")})
+	}
+	if job.CancelledAt != nil {
+		timeline = append(timeline, [2]string{"Cancelled", job.CancelledAt.Format("2006-01-02 15:04")})
+	}
+	if len(timeline) > 0 {
+		fmt.Println()
+		fmt.Println(output.Bold("Timeline:"))
+		for _, t := range timeline {
+			fmt.Printf("  %-18s%s\n", output.Bold(t[0]+":"), t[1])
+		}
 	}
 
 	if job.Description != "" {
@@ -926,7 +1057,42 @@ func printJob(job *api.Job) {
 		fmt.Println(output.Bold("Description:"))
 		fmt.Printf("  %s\n", job.Description)
 	}
+	if job.Requirements != "" {
+		fmt.Println()
+		fmt.Println(output.Bold("Requirements:"))
+		fmt.Printf("  %s\n", job.Requirements)
+	}
+	if job.Input != "" {
+		fmt.Println()
+		fmt.Println(output.Bold("Input:"))
+		fmt.Printf("  %s\n", job.Input)
+	}
+	if job.Output != "" {
+		fmt.Println()
+		fmt.Println(output.Bold("Output:"))
+		fmt.Printf("  %s\n", job.Output)
+	}
 	fmt.Println()
+}
+
+// formatBytes renders a byte count as a short human-readable string for
+// attachment metadata. Stays inside this file because it's only used here.
+func formatBytes(n int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case n >= GB:
+		return fmt.Sprintf("%.1f GB", float64(n)/float64(GB))
+	case n >= MB:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(MB))
+	case n >= KB:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 func formatRewards(rewards []api.TokenReward) string {
@@ -980,7 +1146,7 @@ func runJobsCycles(cmd *cobra.Command, args []string) error {
 	result, err := client.ListCycles(args[0], page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -1022,15 +1188,20 @@ func runJobsCycles(cmd *cobra.Command, args []string) error {
 func runJobsCycleSubmit(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
-	content, _ := cmd.Flags().GetString("content")
+	rawContent, _ := cmd.Flags().GetString("content")
+	content, err := resolveContent(rawContent)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
 	attachments, _ := cmd.Flags().GetStringSlice("attachment")
 
 	if content == "" && len(attachments) == 0 {
 		output.Error("Provide at least --content or --attachment")
-		return nil
+		return fmt.Errorf("missing content or attachment")
 	}
 
 	warnIfContentLooksLikeLocalPath(content)
@@ -1040,45 +1211,62 @@ func runJobsCycleSubmit(cmd *cobra.Command, args []string) error {
 	resolvedAttachments, err := resolveAttachments(client, attachments)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
-	cycle, err := client.SubmitCycle(args[0], api.SubmitRequest{
+	resp, err := client.SubmitCycle(args[0], api.SubmitRequest{
 		Content:     content,
 		Attachments: resolvedAttachments,
 	})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
-		return output.JSON(cycle)
+		return output.JSON(resp)
 	}
 
-	output.Success(fmt.Sprintf("Cycle #%d submitted — awaiting publisher review", cycle.CycleNumber))
-	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(cycle.Status))
+	if resp.Cycle == nil {
+		output.Warn("Server returned no cycle data")
+		return nil
+	}
+	output.Success(fmt.Sprintf("Cycle #%d submitted — awaiting publisher review", resp.Cycle.CycleNumber))
+	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(resp.Cycle.Status))
 	return nil
 }
 
 func runJobsCycleComplete(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	cycle, err := client.CompleteCycle(args[0])
+	resp, err := client.CompleteCycle(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
-		return output.JSON(cycle)
+		return output.JSON(resp)
 	}
 
-	output.Success(fmt.Sprintf("Cycle #%d completed — tokens settled to executor", cycle.CycleNumber))
+	if resp.Cycle == nil {
+		output.Warn("Server returned no cycle data")
+		return nil
+	}
+	output.Success(fmt.Sprintf("Cycle #%d completed — tokens settled to executor", resp.Cycle.CycleNumber))
+	if resp.Job != nil {
+		fmt.Printf("  Job status:   %s\n", output.StatusColor(resp.Job.Status))
+		if len(resp.Job.PoolBalance) > 0 {
+			fmt.Printf("  Pool balance: %s\n", formatPoolBalance(resp.Job.PoolBalance))
+		}
+		if resp.Job.Status == "paused" {
+			output.Warn("Pool insufficient for next cycle — job auto-paused. Use 'awh jobs topup' then 'awh jobs resume'.")
+		}
+	}
 	fmt.Println()
 	return nil
 }
@@ -1086,31 +1274,40 @@ func runJobsCycleComplete(cmd *cobra.Command, args []string) error {
 func runJobsCycleRevise(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
-	content, _ := cmd.Flags().GetString("content")
-
-	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
-	cycle, err := client.RequestCycleRevision(args[0], api.RevisionRequest{Content: content})
+	rawContent, _ := cmd.Flags().GetString("content")
+	content, err := resolveContent(rawContent)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
+	}
+
+	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
+	resp, err := client.RequestCycleRevision(args[0], api.RevisionRequest{Content: content})
+	if err != nil {
+		output.Error(err.Error())
+		return err
 	}
 
 	if outputJSON {
-		return output.JSON(cycle)
+		return output.JSON(resp)
 	}
 
-	output.Success(fmt.Sprintf("Revision requested for cycle #%d", cycle.CycleNumber))
-	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(cycle.Status))
+	if resp.Cycle == nil {
+		output.Warn("Server returned no cycle data")
+		return nil
+	}
+	output.Success(fmt.Sprintf("Revision requested for cycle #%d", resp.Cycle.CycleNumber))
+	fmt.Printf("  Cycle status: %s\n\n", output.StatusColor(resp.Cycle.Status))
 	return nil
 }
 
 func runJobsTopUp(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	modelID, _ := cmd.Flags().GetString("model")
@@ -1120,7 +1317,7 @@ func runJobsTopUp(cmd *cobra.Command, args []string) error {
 	job, err := client.TopUpPool(args[0], []api.TokenReward{{ModelID: modelID, Amount: amount}})
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -1135,14 +1332,14 @@ func runJobsTopUp(cmd *cobra.Command, args []string) error {
 func runJobsPause(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.PauseJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -1157,14 +1354,14 @@ func runJobsPause(cmd *cobra.Command, args []string) error {
 func runJobsResume(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	job, err := client.ResumeJob(args[0])
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -1179,17 +1376,37 @@ func runJobsResume(cmd *cobra.Command, args []string) error {
 func runJobsCreate(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	title, _ := cmd.Flags().GetString("title")
-	description, _ := cmd.Flags().GetString("description")
+	rawDescription, _ := cmd.Flags().GetString("description")
+	description, err := resolveContent(rawDescription)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
 	rewardAmount, _ := cmd.Flags().GetInt64("reward-amount")
 	rewardModel, _ := cmd.Flags().GetString("reward-model")
 	mode, _ := cmd.Flags().GetString("mode")
-	requirements, _ := cmd.Flags().GetString("requirements")
-	input, _ := cmd.Flags().GetString("input")
-	outputDesc, _ := cmd.Flags().GetString("output")
+	rawRequirements, _ := cmd.Flags().GetString("requirements")
+	requirements, err := resolveContent(rawRequirements)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
+	rawInput, _ := cmd.Flags().GetString("input")
+	input, err := resolveContent(rawInput)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
+	rawOutputDesc, _ := cmd.Flags().GetString("output")
+	outputDesc, err := resolveContent(rawOutputDesc)
+	if err != nil {
+		output.Error(err.Error())
+		return err
+	}
 	duration, _ := cmd.Flags().GetString("duration")
 	skillsStr, _ := cmd.Flags().GetString("skills")
 	intervalDays, _ := cmd.Flags().GetInt("interval-days")
@@ -1198,7 +1415,7 @@ func runJobsCreate(cmd *cobra.Command, args []string) error {
 
 	if mode == "recurring" && intervalDays < 1 {
 		output.Error("--interval-days must be >= 1 for recurring mode")
-		return nil
+		return fmt.Errorf("invalid --interval-days: %d", intervalDays)
 	}
 
 	var skills []string
@@ -1237,7 +1454,7 @@ func runJobsCreate(cmd *cobra.Command, args []string) error {
 	job, err := client.CreateJob(req)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {

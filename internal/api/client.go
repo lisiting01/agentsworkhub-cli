@@ -183,6 +183,9 @@ type Job struct {
 	ID            string        `json:"_id"`
 	Title         string        `json:"title"`
 	Description   string        `json:"description"`
+	Requirements  string        `json:"requirements,omitempty"`
+	Input         string        `json:"input,omitempty"`
+	Output        string        `json:"output,omitempty"`
 	Status        string        `json:"status"`
 	Mode          string        `json:"mode"` // "oneoff" or "recurring"
 	PublisherName string        `json:"publisherName"`
@@ -196,6 +199,11 @@ type Job struct {
 	PausedAt           *time.Time   `json:"pausedAt,omitempty"`
 	Skills        []string      `json:"skills"`
 	Duration      string        `json:"duration"`
+	SubmittedAt         *time.Time `json:"submittedAt,omitempty"`
+	AcceptedAt          *time.Time `json:"acceptedAt,omitempty"`
+	CompletedAt         *time.Time `json:"completedAt,omitempty"`
+	CancelledAt         *time.Time `json:"cancelledAt,omitempty"`
+	RevisionRequestedAt *time.Time `json:"revisionRequestedAt,omitempty"`
 	CreatedAt     *time.Time    `json:"createdAt"`
 	UpdatedAt     *time.Time    `json:"updatedAt"`
 }
@@ -227,7 +235,7 @@ func (c *Client) CreateJob(req CreateJobRequest) (*Job, error) {
 	return &out, err
 }
 
-func (c *Client) ListJobs(status, mode, q string, page, limit int) (*JobListResponse, error) {
+func (c *Client) ListJobs(status, mode, q, skill string, page, limit int) (*JobListResponse, error) {
 	params := url.Values{}
 	if status != "" {
 		params.Set("status", status)
@@ -237,6 +245,9 @@ func (c *Client) ListJobs(status, mode, q string, page, limit int) (*JobListResp
 	}
 	if q != "" {
 		params.Set("q", q)
+	}
+	if skill != "" {
+		params.Set("skill", skill)
 	}
 	params.Set("page", fmt.Sprintf("%d", page))
 	params.Set("limit", fmt.Sprintf("%d", limit))
@@ -268,13 +279,6 @@ func (c *Client) MyJobs(role, status, mode string, page, limit int) (*JobListRes
 
 	var out JobListResponse
 	_, err := c.do("GET", "/api/jobs/mine?"+params.Encode(), nil, &out)
-	return &out, err
-}
-
-// Deprecated: server returns 410. Use PlaceBid + SelectBid instead.
-func (c *Client) AcceptJob(id string) (*Job, error) {
-	var out Job
-	_, err := c.do("POST", "/api/jobs/"+id+"/accept", struct{}{}, &out)
 	return &out, err
 }
 
@@ -377,13 +381,26 @@ func (c *Client) RequestRevision(id string, req RevisionRequest) (*Job, error) {
 
 // --- Messages ---
 
+// MessageAttachment is what the platform populates onto a message's
+// attachments array (see lib/models/job-message.ts + populate selector in
+// /api/jobs/[id]/messages). The platform may also return raw ObjectId
+// strings on routes that don't populate; consumers should be tolerant.
+type MessageAttachment struct {
+	ID           string     `json:"_id"`
+	OriginalName string     `json:"originalName"`
+	MimeType     string     `json:"mimeType,omitempty"`
+	Size         int64      `json:"size,omitempty"`
+	CreatedAt    *time.Time `json:"createdAt,omitempty"`
+}
+
 type Message struct {
-	ID          string     `json:"_id"`
-	Type        string     `json:"type"`
-	Content     string     `json:"content"`
-	SenderName  string     `json:"senderName"`
-	Attachments []any      `json:"attachments"`
-	CreatedAt   *time.Time `json:"createdAt"`
+	ID          string              `json:"_id"`
+	Type        string              `json:"type"`
+	Content     string              `json:"content"`
+	SenderName  string              `json:"senderName"`
+	Attachments []MessageAttachment `json:"attachments"`
+	CycleNumber int                 `json:"cycleNumber,omitempty"`
+	CreatedAt   *time.Time          `json:"createdAt"`
 }
 
 type MessageListResponse struct {
@@ -416,14 +433,26 @@ func (c *Client) SendMessage(jobID string, req SendMessageRequest) (*Message, er
 }
 
 // --- Transactions ---
+//
+// Platform Transaction (lib/models/transaction.ts):
+//   • amount is signed: positive = credit, negative = debit
+//   • types: pool_deposit (debit, negative), settlement (credit), pool_refund
+//     (credit), grant (admin top-up). Legacy "escrow" / "refund" still appear
+//     in older records.
+//   • description holds the human-readable note (NOT "note" — that was the
+//     pre-pool name and remains a CLI bug to be wary of in the future).
 
 type Transaction struct {
-	ID        string     `json:"_id"`
-	Type      string     `json:"type"`
-	ModelID   string     `json:"modelId"`
-	Amount    int64      `json:"amount"`
-	Note      string     `json:"note"`
-	CreatedAt *time.Time `json:"createdAt"`
+	ID             string     `json:"_id"`
+	Type           string     `json:"type"`
+	UserID         string     `json:"userId,omitempty"`
+	CounterpartyID string     `json:"counterpartyId,omitempty"`
+	ModelID        string     `json:"modelId"`
+	Amount         int64      `json:"amount"`
+	Balance        int64      `json:"balance,omitempty"`
+	JobID          string     `json:"jobId,omitempty"`
+	Description    string     `json:"description"`
+	CreatedAt      *time.Time `json:"createdAt"`
 }
 
 type TransactionListResponse struct {
@@ -484,20 +513,29 @@ func (c *Client) GetCurrentCycle(jobID string) (*JobCycle, error) {
 	return &out, err
 }
 
-func (c *Client) SubmitCycle(jobID string, req SubmitRequest) (*JobCycle, error) {
-	var out JobCycle
+// CycleResponse is the wrapped envelope returned by the three cycle-mutating
+// endpoints (submit / complete / request-revision). The platform always
+// returns { job, cycle } so callers can update both views in a single round
+// trip.
+type CycleResponse struct {
+	Job   *Job      `json:"job"`
+	Cycle *JobCycle `json:"cycle"`
+}
+
+func (c *Client) SubmitCycle(jobID string, req SubmitRequest) (*CycleResponse, error) {
+	var out CycleResponse
 	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/submit", req, &out)
 	return &out, err
 }
 
-func (c *Client) CompleteCycle(jobID string) (*JobCycle, error) {
-	var out JobCycle
+func (c *Client) CompleteCycle(jobID string) (*CycleResponse, error) {
+	var out CycleResponse
 	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/complete", struct{}{}, &out)
 	return &out, err
 }
 
-func (c *Client) RequestCycleRevision(jobID string, req RevisionRequest) (*JobCycle, error) {
-	var out JobCycle
+func (c *Client) RequestCycleRevision(jobID string, req RevisionRequest) (*CycleResponse, error) {
+	var out CycleResponse
 	_, err := c.do("POST", "/api/jobs/"+jobID+"/cycles/current/request-revision", req, &out)
 	return &out, err
 }
@@ -619,6 +657,99 @@ func (c *Client) ConfirmUpload(fileID string) (*File, error) {
 	var out File
 	_, err := c.do("POST", "/api/files/"+fileID+"/confirm", struct{}{}, &out)
 	return &out, err
+}
+
+// DownloadFile streams the file behind fileID into out and returns the
+// canonical filename reported by the server (Content-Disposition or fallback).
+//
+// The platform's GET /api/files/{id} responds with a 302 redirect to a
+// presigned R2 URL. We must NOT forward the X-Agent-* headers to R2 (they
+// would either be ignored or, worse, cause the presigned URL signature to
+// fail), so the redirect is followed manually with a fresh, header-less
+// request.
+func (c *Client) DownloadFile(fileID string, out io.Writer) (string, error) {
+	// Step 1: hit the API with auth, but DO NOT follow the redirect.
+	apiClient := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, c.BaseURL+"/api/files/"+fileID, nil)
+	if err != nil {
+		return "", err
+	}
+	if c.AgentName != "" {
+		req.Header.Set("X-Agent-Name", c.AgentName)
+	}
+	if c.AgentToken != "" {
+		req.Header.Set("X-Agent-Token", c.AgentToken)
+	}
+	resp, err := apiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request file metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		var apiErr struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &apiErr)
+		msg := apiErr.Error
+		if msg == "" {
+			msg = apiErr.Message
+		}
+		if msg == "" {
+			msg = strings.TrimSpace(string(body))
+		}
+		return "", &APIError{StatusCode: resp.StatusCode, Message: msg}
+	}
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusMovedPermanently &&
+		resp.StatusCode != http.StatusTemporaryRedirect && resp.StatusCode != http.StatusPermanentRedirect {
+		return "", fmt.Errorf("unexpected status %d (expected 302 redirect)", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("server returned %d but no Location header", resp.StatusCode)
+	}
+
+	// Step 2: download from the presigned URL with no extra headers.
+	dlClient := &http.Client{Timeout: 10 * time.Minute}
+	dlResp, err := dlClient.Get(loc)
+	if err != nil {
+		return "", fmt.Errorf("download presigned url: %w", err)
+	}
+	defer dlResp.Body.Close()
+	if dlResp.StatusCode >= 400 {
+		body, _ := io.ReadAll(dlResp.Body)
+		return "", fmt.Errorf("download failed: HTTP %d: %s", dlResp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if _, err := io.Copy(out, dlResp.Body); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	filename := filenameFromContentDisposition(dlResp.Header.Get("Content-Disposition"))
+	return filename, nil
+}
+
+// filenameFromContentDisposition extracts the filename from a
+// Content-Disposition header value. Returns "" if none parsed.
+func filenameFromContentDisposition(cd string) string {
+	if cd == "" {
+		return ""
+	}
+	if _, params, err := mime.ParseMediaType(cd); err == nil {
+		if v, ok := params["filename"]; ok && v != "" {
+			return v
+		}
+		if v, ok := params["filename*"]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // DetectContentType returns a best-effort MIME type for a local file path.

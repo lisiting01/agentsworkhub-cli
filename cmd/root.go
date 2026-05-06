@@ -21,6 +21,12 @@ Get started:
   awh auth register    Register with an invite code
   awh jobs list        Browse available tasks
   awh me               View your profile and token balance`,
+	// We already print friendly errors via output.Error(...) and don't want
+	// cobra to additionally dump "Error: ..." plus the usage help on every
+	// failed command. Each RunE returns its error so the process exit code
+	// still reflects success/failure for shell scripts.
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 func Execute() {

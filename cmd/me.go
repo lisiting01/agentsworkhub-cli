@@ -40,7 +40,8 @@ func init() {
 	meUpdateCmd.Flags().String("bio", "", "Short bio")
 	meUpdateCmd.Flags().String("country", "", "Country")
 	meUpdateCmd.Flags().String("contact", "", "Contact URL or info")
-	meUpdateCmd.Flags().String("hidden", "", "Set visibility: true or false")
+	meUpdateCmd.Flags().Bool("hidden", false, "Hide your profile from the public agent list")
+	meUpdateCmd.Flags().Bool("visible", false, "Show your profile on the public agent list")
 }
 
 func requireAuth() (*config.Config, error) {
@@ -74,14 +75,14 @@ func loadConfig() (*config.Config, error) {
 func runMe(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	client := api.New(cfg.BaseURL, cfg.Name, cfg.Token)
 	profile, err := client.Me()
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -108,6 +109,12 @@ func runMe(cmd *cobra.Command, args []string) error {
 		hiddenStr = output.Yellow("hidden")
 	}
 	fmt.Printf("  %-16s%s\n", output.Bold("Visibility:"), hiddenStr)
+	if profile.LastActiveAt != nil {
+		fmt.Printf("  %-16s%s\n", output.Bold("Last Active:"), profile.LastActiveAt.Format("2006-01-02 15:04:05"))
+	}
+	if profile.CreatedAt != nil {
+		fmt.Printf("  %-16s%s\n", output.Bold("Joined:"), profile.CreatedAt.Format("2006-01-02"))
+	}
 
 	fmt.Println()
 	fmt.Println(output.Bold("Token Balances:"))
@@ -125,7 +132,7 @@ func runMe(cmd *cobra.Command, args []string) error {
 func runTransactions(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	modelID, _ := cmd.Flags().GetString("model")
@@ -136,7 +143,7 @@ func runTransactions(cmd *cobra.Command, args []string) error {
 	result, err := client.MyTransactions(modelID, page, limit)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
@@ -158,38 +165,48 @@ func runTransactions(cmd *cobra.Command, args []string) error {
 		if tx.CreatedAt != nil {
 			date = tx.CreatedAt.Format("2006-01-02")
 		}
-		sign := "+"
-		if tx.Type == "escrow" {
-			sign = "-"
+		// Platform stores signed amounts (pool_deposit is already negative,
+		// settlement / pool_refund / grant are positive). Render the sign
+		// straight from the value rather than synthesizing one from type.
+		amount := output.SignedTokens(tx.Amount)
+		balance := ""
+		if tx.Balance != 0 || tx.Type == "settlement" || tx.Type == "pool_refund" || tx.Type == "grant" {
+			balance = output.FormatTokens(tx.Balance)
 		}
 		rows[i] = []string{
 			date,
 			colorTxType(tx.Type),
 			tx.ModelID,
-			sign + output.FormatTokens(tx.Amount),
-			output.Truncate(tx.Note, 40),
+			amount,
+			balance,
+			output.Truncate(tx.Description, 40),
 		}
 	}
-	output.Table([]string{"Date", "Type", "Model", "Amount", "Note"}, rows)
+	output.Table([]string{"Date", "Type", "Model", "Amount", "Balance", "Description"}, rows)
 	fmt.Println()
 	return nil
 }
 
+// colorTxType renders the transaction type with a color matching its effect
+// on the agent's balance:
+//   - credits (settlement / pool_refund / grant)   → green
+//   - debits  (pool_deposit)                       → yellow
+//   - legacy  (escrow / refund) kept for old data  → faint
 func colorTxType(t string) string {
 	switch t {
-	case "grant", "settlement", "refund":
+	case "settlement", "pool_refund", "grant", "refund":
 		return output.Green(t)
-	case "escrow":
+	case "pool_deposit", "escrow":
 		return output.Yellow(t)
 	default:
-		return t
+		return output.Faint(t)
 	}
 }
 
 func runMeUpdate(cmd *cobra.Command, args []string) error {
 	cfg, err := requireAuth()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	req := api.UpdateProfileRequest{}
@@ -210,24 +227,27 @@ func runMeUpdate(cmd *cobra.Command, args []string) error {
 		req.Contact = &v
 		changed = true
 	}
-	if cmd.Flags().Changed("hidden") {
-		v, _ := cmd.Flags().GetString("hidden")
-		switch strings.ToLower(v) {
-		case "true", "1", "yes":
-			b := true
-			req.Hidden = &b
-		case "false", "0", "no":
-			b := false
-			req.Hidden = &b
-		default:
-			output.Error("--hidden must be true or false")
-			return nil
-		}
+	hiddenSet := cmd.Flags().Changed("hidden")
+	visibleSet := cmd.Flags().Changed("visible")
+	if hiddenSet && visibleSet {
+		output.Error("--hidden and --visible are mutually exclusive")
+		return fmt.Errorf("conflicting visibility flags")
+	}
+	if hiddenSet {
+		v, _ := cmd.Flags().GetBool("hidden")
+		req.Hidden = &v
+		changed = true
+	}
+	if visibleSet {
+		v, _ := cmd.Flags().GetBool("visible")
+		// `--visible` is the inverse of `hidden`.
+		hidden := !v
+		req.Hidden = &hidden
 		changed = true
 	}
 
 	if !changed {
-		output.Warn("No fields specified. Use --bio, --country, --contact, or --hidden.")
+		output.Warn("No fields specified. Use --bio, --country, --contact, --hidden, or --visible.")
 		return nil
 	}
 
@@ -235,7 +255,7 @@ func runMeUpdate(cmd *cobra.Command, args []string) error {
 	profile, err := client.UpdateProfile(req)
 	if err != nil {
 		output.Error(err.Error())
-		return nil
+		return err
 	}
 
 	if outputJSON {
