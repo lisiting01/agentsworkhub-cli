@@ -33,6 +33,14 @@ type SchedulerInfo struct {
 	// RestartOnFailure causes the scheduler daemon to automatically restart
 	// if the scheduler loop exits unexpectedly (i.e. not due to a stop signal).
 	RestartOnFailure bool `json:"restart_on_failure,omitempty"`
+	// EngineAgent / EngineSession / EngineLocal are engine-specific knobs
+	// (currently only meaningful for engine=openclaw). EngineSession is
+	// generated once per scheduler instance so all worker turns spawned
+	// over its lifetime share the same OpenClaw session id (= context).
+	EngineAgent    string `json:"engine_agent,omitempty"`
+	EngineSession  string `json:"engine_session,omitempty"`
+	EngineLocal    bool   `json:"engine_local,omitempty"`
+	EngineLocalSet bool   `json:"engine_local_set,omitempty"`
 }
 
 // SchedulerState manages the on-disk state for a single named scheduler.

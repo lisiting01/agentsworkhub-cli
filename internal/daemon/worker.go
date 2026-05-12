@@ -24,6 +24,18 @@ type WorkerInfo struct {
 	SkillFile string    `json:"skill_file,omitempty"`
 	WorkDir   string    `json:"work_dir,omitempty"`
 	StartedAt time.Time `json:"started_at"`
+	// EngineAgent is the engine-side agent identifier (currently only
+	// meaningful for engine=openclaw → OpenClaw `--agent <id>`).
+	EngineAgent string `json:"engine_agent,omitempty"`
+	// EngineSession is the engine-side session identifier shared across
+	// turns (currently only meaningful for engine=openclaw →
+	// OpenClaw `--session-id <id>`). Multiple worker turns with the same
+	// EngineSession keep context across invocations.
+	EngineSession string `json:"engine_session,omitempty"`
+	// EngineLocal indicates the engine ran in self-contained "local" mode
+	// instead of talking to a daemon (currently only meaningful for
+	// engine=openclaw → `openclaw agent --local`).
+	EngineLocal bool `json:"engine_local,omitempty"`
 }
 
 // WorkerState manages the on-disk state for a single agent worker.

@@ -14,6 +14,30 @@ type Config struct {
 	Token   string            `json:"token"`
 	BaseURL string            `json:"base_url"`
 	Env     map[string]string `json:"env,omitempty"` // extra env vars injected into AI engine child processes
+	// OpenClaw holds defaults for the openclaw engine. All fields optional;
+	// CLI flags always override config values, which override the
+	// hard-coded defaults.
+	OpenClaw OpenClawConfig `json:"openclaw,omitempty"`
+}
+
+// OpenClawConfig holds default knobs for `awh agent run --engine openclaw`
+// and `awh agent schedule --engine openclaw` so the user does not have to
+// pass `--engine-agent` etc. on every invocation. Empty fields are ignored.
+type OpenClawConfig struct {
+	// AgentID is the OpenClaw `--agent <id>` value to use when the user
+	// does not pass `--engine-agent`. Required for the openclaw engine to
+	// function; the platform-side OpenClaw agent must already exist
+	// (created via `openclaw agents add`).
+	AgentID string `json:"agent_id,omitempty"`
+	// SessionPrefix is prepended to the auto-generated session id
+	// (default "awh-worker"). Allows operating multiple awh deployments
+	// against the same OpenClaw without session-id collisions.
+	SessionPrefix string `json:"session_prefix,omitempty"`
+	// Local toggles the default `--local` behaviour. When false (the
+	// default), the openclaw engine talks to the gateway daemon; when
+	// true, every invocation runs an embedded one-shot. CLI flag
+	// `--engine-local` still overrides per-invocation.
+	Local bool `json:"local,omitempty"`
 }
 
 func configDir() (string, error) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -37,16 +38,53 @@ type StreamingEngine interface {
 	RunStreaming(ctx context.Context, in EngineInput, out io.Writer) (*exec.Cmd, error)
 }
 
+// EngineOptions carries engine-specific knobs that are only meaningful for
+// some engines (currently only OpenClaw). The zero value is the safe default
+// for all engines, so callers that don't care about these may pass an empty
+// struct (or use NewEngineSimple).
+type EngineOptions struct {
+	// OpenClawAgentID is the OpenClaw `--agent <id>` value. Required when
+	// engine name is "openclaw".
+	OpenClawAgentID string
+	// OpenClawSessionID is the OpenClaw `--session-id <id>` value. When
+	// non-empty, multiple turns sharing the same session id keep context
+	// across invocations (one of the main reasons to choose OpenClaw over
+	// Claude Code as the worker container).
+	OpenClawSessionID string
+	// OpenClawLocal forces `openclaw agent --local` (embedded one-shot),
+	// bypassing the gateway daemon. Slower per-turn startup but does not
+	// require a running gateway.
+	OpenClawLocal bool
+	// WorkerDir is the on-disk directory where the engine may stash
+	// per-invocation artifacts (e.g. an oversized message payload spilled
+	// to disk). When empty, the OS temp dir is used.
+	WorkerDir string
+}
+
 // NewEngine creates the appropriate engine based on the configured name.
 // extraEnv is an optional map of KEY→VALUE pairs injected into the child
 // process environment on top of the current process's environment; config
 // values take highest priority and can override OS-level env vars.
-func NewEngine(name, path, model string, extraArgs []string, extraEnv map[string]string) Engine {
+//
+// opts carries engine-specific options; it is consulted only by engines that
+// understand it (currently OpenClaw). Other engines treat it as a no-op so
+// callers may always pass the same options struct regardless of engine.
+func NewEngine(name, path, model string, extraArgs []string, extraEnv map[string]string, opts EngineOptions) Engine {
 	switch strings.ToLower(name) {
 	case "claude", "claude-code":
 		return &ClaudeEngine{path: path, model: model, extraArgs: extraArgs, extraEnv: extraEnv}
 	case "codex":
 		return &CodexEngine{path: path, extraArgs: extraArgs, extraEnv: extraEnv}
+	case "openclaw":
+		return &OpenClawEngine{
+			path:      path,
+			agentID:   opts.OpenClawAgentID,
+			sessionID: opts.OpenClawSessionID,
+			useLocal:  opts.OpenClawLocal,
+			workerDir: opts.WorkerDir,
+			extraArgs: extraArgs,
+			extraEnv:  extraEnv,
+		}
 	default:
 		return &GenericEngine{path: path, extraArgs: extraArgs, extraEnv: extraEnv}
 	}
@@ -425,4 +463,289 @@ func newCmd(ctx context.Context, path string, args []string, workDir string) *ex
 	}
 	applyNoWindow(cmd)
 	return cmd
+}
+
+// --- OpenClaw Engine ---
+// OpenClaw (https://docs.openclaw.ai) is a personal-assistant gateway whose
+// `agent` command also doubles as a competent agent container: it has bash
+// and process tools by default, persistent sessions via `--session-id`, and
+// isolated agents via `--agent <id>`. We treat it as a peer to Claude Code
+// for awh worker purposes.
+//
+// Invocation differences vs. Claude Code:
+//   - `-m, --message <text>` is a required CLI argument; there is NO stdin.
+//     Long messages spill to a temp file and the message text becomes a
+//     pointer ("payload at <path>, please Read it").
+//   - `--json` returns a single terminal payload object, NOT a stream-json
+//     log. We collect stdout in full, then both write the raw JSON and a
+//     synthetic `[awh-result]\n<text>` block to the caller's writer for
+//     parity with Claude's stream-json viewers.
+//   - There is NO `--append-system-prompt`. The system appendix is folded
+//     into the user message head (Codex-style).
+//
+// Default mode is gateway: we expect `openclaw gateway` daemon to be
+// running and our invocation just dispatches an RPC. Pass useLocal=true to
+// force `openclaw agent --local` (embedded one-shot, slower but
+// self-contained).
+
+// openClawMessageInlineLimit caps how big a single --message argument may
+// grow before we spill it to disk and pass a pointer instead. Picked well
+// below Windows cmd's command-line length ceiling so the entire argv
+// (including the message) stays comfortably under the limit even with long
+// agent ids and extra args.
+const openClawMessageInlineLimit = 4096
+
+type OpenClawEngine struct {
+	path      string
+	agentID   string
+	sessionID string
+	useLocal  bool
+	workerDir string
+	extraArgs []string
+	extraEnv  map[string]string
+}
+
+func (e *OpenClawEngine) Name() string { return "openclaw" }
+
+// buildArgs constructs the openclaw CLI argv. message is the already-prepared
+// --message value (either the inline payload or a "payload at <path>" pointer).
+func (e *OpenClawEngine) buildArgs(message string) []string {
+	args := []string{"agent", "--json"}
+	if e.useLocal {
+		args = append(args, "--local")
+	}
+	if e.agentID != "" {
+		args = append(args, "--agent", e.agentID)
+	}
+	if e.sessionID != "" {
+		args = append(args, "--session-id", e.sessionID)
+	}
+	args = append(args, "--message", message)
+	args = append(args, e.extraArgs...)
+	return args
+}
+
+// prepareMessage folds the system appendix into the user message and, if the
+// combined payload exceeds openClawMessageInlineLimit, writes it to disk so
+// the actual --message value stays short enough for any platform's
+// command-line length limit.
+//
+// Returns (msgArg, cleanup). cleanup deletes the spill file (if any) and is
+// always safe to call.
+func (e *OpenClawEngine) prepareMessage(systemAppendix, userMessage string) (string, func()) {
+	combined := fallbackCombine(systemAppendix, userMessage)
+	if len(combined) <= openClawMessageInlineLimit {
+		return combined, func() {}
+	}
+
+	dir := e.workerDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		// Spill failed; fall back to inline (the OS will reject if too long
+		// and we'll surface the error from the spawn).
+		return combined, func() {}
+	}
+
+	f, err := os.CreateTemp(dir, "openclaw-message-*.txt")
+	if err != nil {
+		return combined, func() {}
+	}
+	if _, err := f.WriteString(combined); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return combined, func() {}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return combined, func() {}
+	}
+
+	pointer := fmt.Sprintf(
+		"Your full instructions are too large to include inline. The complete payload "+
+			"has been written to the local file:\n\n  %s\n\nUse your file-reading tool "+
+			"(e.g. Read) to load the entire file before deciding what to do. Treat the "+
+			"file contents as the authoritative user message for this turn.",
+		filepath.ToSlash(f.Name()),
+	)
+	return pointer, func() { _ = os.Remove(f.Name()) }
+}
+
+// openclawJSONResponse models the terminal --json payload from `openclaw
+// agent`. Only fields we actually consume are typed; the rest is ignored.
+type openclawJSONResponse struct {
+	Payloads []struct {
+		Text     string `json:"text"`
+		MediaURL string `json:"mediaUrl"`
+	} `json:"payloads"`
+	Meta           map[string]any `json:"meta"`
+	DeliveryStatus map[string]any `json:"deliveryStatus"`
+	Error          string         `json:"error"`
+	Result         struct {
+		Payloads []struct {
+			Text     string `json:"text"`
+			MediaURL string `json:"mediaUrl"`
+		} `json:"payloads"`
+	} `json:"result"`
+}
+
+// extractOpenClawText pulls the concatenated reply text out of a parsed
+// openclaw JSON response, handling both top-level `payloads` (embedded run)
+// and `result.payloads` (gateway-backed run).
+func extractOpenClawText(resp *openclawJSONResponse) string {
+	pick := resp.Payloads
+	if len(pick) == 0 {
+		pick = resp.Result.Payloads
+	}
+	if len(pick) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, p := range pick {
+		if p.Text == "" {
+			continue
+		}
+		if i > 0 && b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
+}
+
+func (e *OpenClawEngine) Run(ctx context.Context, in EngineInput) (string, error) {
+	msg, cleanup := e.prepareMessage(in.SystemAppendix, in.UserMessage)
+	defer cleanup()
+
+	cmd := newCmd(ctx, e.path, e.buildArgs(msg), in.WorkDir)
+	cmd.Env = buildEnv("", "", e.extraEnv)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	runErr := cmd.Run()
+
+	stdoutText := strings.TrimSpace(stdoutBuf.String())
+	stderrText := strings.TrimSpace(stderrBuf.String())
+
+	if stdoutText == "" {
+		if runErr != nil {
+			if stderrText != "" {
+				return "", fmt.Errorf("openclaw exited with no output: %w (stderr: %s)", runErr, stderrText)
+			}
+			return "", fmt.Errorf("openclaw exited with no output: %w", runErr)
+		}
+		return "", fmt.Errorf("openclaw produced no output")
+	}
+
+	var resp openclawJSONResponse
+	if err := json.Unmarshal([]byte(stdoutText), &resp); err != nil {
+		// Gateway diagnostics may print extra lines on stdout; try to find
+		// the last `{...}` block and parse that.
+		if jsonStart := strings.LastIndexByte(stdoutText, '{'); jsonStart >= 0 {
+			candidate := stdoutText[jsonStart:]
+			if err2 := json.Unmarshal([]byte(candidate), &resp); err2 == nil {
+				goto parsed
+			}
+		}
+		if stderrText != "" {
+			return "", fmt.Errorf("openclaw output is not valid JSON: %w (stderr: %s, output: %s)",
+				err, stderrText, truncateForError(stdoutText))
+		}
+		return "", fmt.Errorf("openclaw output is not valid JSON: %w (output: %s)",
+			err, truncateForError(stdoutText))
+	}
+parsed:
+	if resp.Error != "" {
+		return "", fmt.Errorf("openclaw error: %s", resp.Error)
+	}
+
+	text := extractOpenClawText(&resp)
+	if text == "" {
+		// Treat empty payloads as a soft success — surface the raw JSON so
+		// the caller can debug, mirroring Claude's behaviour when the
+		// model returns no assistant text but the run completed.
+		return "", fmt.Errorf("openclaw returned no text payloads (output: %s)", truncateForError(stdoutText))
+	}
+	if runErr != nil {
+		// Non-zero exit but parseable JSON with text — surface the warning
+		// to caller without dropping the result.
+		if stderrText != "" {
+			return text, fmt.Errorf("openclaw exited with error: %w (stderr: %s)", runErr, stderrText)
+		}
+	}
+	return text, nil
+}
+
+// RunStreaming starts openclaw in a goroutine, collects the terminal JSON,
+// and writes a synthetic stream to out so log viewers built for
+// stream-json (Claude Code) still see something useful. The returned cmd is
+// already-completed by the time the synthetic events are written; callers
+// should still call cmd.Wait() to satisfy the StreamingEngine contract,
+// though Wait will return immediately.
+func (e *OpenClawEngine) RunStreaming(ctx context.Context, in EngineInput, out io.Writer) (*exec.Cmd, error) {
+	msg, cleanup := e.prepareMessage(in.SystemAppendix, in.UserMessage)
+
+	cmd := newCmd(ctx, e.path, e.buildArgs(msg), in.WorkDir)
+	cmd.Env = buildEnv("", "", e.extraEnv)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	// OpenClaw's progress / diagnostics go to stderr; forward them so the
+	// worker.log shows what the engine is doing while the JSON aggregates.
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("start openclaw: %w", err)
+	}
+
+	// Drain stdout in a goroutine, then synthesize a stream-json-ish view
+	// for the writer once we have the full payload. Because OpenClaw
+	// returns a single JSON document, we cannot stream incrementally.
+	go func() {
+		defer cleanup()
+
+		raw, readErr := io.ReadAll(stdout)
+		// Always wait so the OS reaps the process and cmd.ProcessState is
+		// populated before any caller observes our synthetic output.
+		_ = cmd.Wait()
+
+		rawTrimmed := strings.TrimSpace(string(raw))
+		if rawTrimmed != "" {
+			fmt.Fprintf(out, "[awh-engine] openclaw final json:\n%s\n", rawTrimmed)
+		}
+		if readErr != nil {
+			fmt.Fprintf(out, "[awh-engine] openclaw stdout read error: %v\n", readErr)
+		}
+
+		var resp openclawJSONResponse
+		if rawTrimmed != "" {
+			if err := json.Unmarshal([]byte(rawTrimmed), &resp); err != nil {
+				if jsonStart := strings.LastIndexByte(rawTrimmed, '{'); jsonStart >= 0 {
+					_ = json.Unmarshal([]byte(rawTrimmed[jsonStart:]), &resp)
+				}
+			}
+		}
+		if text := extractOpenClawText(&resp); text != "" {
+			fmt.Fprintf(out, "[awh-result]\n%s\n", text)
+		}
+	}()
+
+	return cmd, nil
+}
+
+// truncateForError shortens a string for inclusion in error messages so we
+// don't dump multi-MB payloads into logs.
+func truncateForError(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }

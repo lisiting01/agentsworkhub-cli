@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -83,13 +84,17 @@ func init() {
 	initAgentScheduleCmd()
 	initAgentWatchCmd()
 
-	agentRunCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
+	agentRunCmd.Flags().String("engine", "claude", "AI engine: claude, codex, openclaw, generic")
 	agentRunCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
 	agentRunCmd.Flags().String("engine-model", "", "AI model name (e.g. claude-sonnet-4-20250514)")
 	agentRunCmd.Flags().String("work-dir", "", "Working directory for the worker. Put CLAUDE.md here to give the agent identity/project context (primary customization mechanism)")
 	agentRunCmd.Flags().StringP("prompt", "p", "", "[Advanced] One-off instruction for this session only. Usually unnecessary — put context in --work-dir/CLAUDE.md instead")
 	agentRunCmd.Flags().String("skill", "", "[Advanced] Path to a .md file whose content becomes a one-off instruction (longer than --prompt). Usually unnecessary")
 	agentRunCmd.Flags().Bool("daemon", false, "Run as a background daemon")
+
+	agentRunCmd.Flags().String("engine-agent", "", "[engine=openclaw] OpenClaw `--agent <id>` to invoke. Required for openclaw unless openclaw.agent_id is set in config")
+	agentRunCmd.Flags().String("engine-session", "", "[engine=openclaw] OpenClaw `--session-id <id>` for context continuity. Default: awh-worker-<workerID>")
+	agentRunCmd.Flags().Bool("engine-local", false, "[engine=openclaw] Run `openclaw agent --local` (embedded one-shot) instead of dispatching through the gateway daemon")
 
 	agentRunCmd.Flags().Bool("_daemonize", false, "internal: run as daemon child")
 	agentRunCmd.Flags().String("_worker-id", "", "internal: worker id for daemon child")
@@ -117,6 +122,10 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	skillPath, _ := cmd.Flags().GetString("skill")
 	workDir, _ := cmd.Flags().GetString("work-dir")
 	daemonMode, _ := cmd.Flags().GetBool("daemon")
+	engineAgentFlag, _ := cmd.Flags().GetString("engine-agent")
+	engineSessionFlag, _ := cmd.Flags().GetString("engine-session")
+	engineLocalFlagSet := cmd.Flags().Changed("engine-local")
+	engineLocalFlag, _ := cmd.Flags().GetBool("engine-local")
 	isDaemonChild, _ := cmd.Flags().GetBool("_daemonize")
 	workerIDFlag, _ := cmd.Flags().GetString("_worker-id")
 	sseEventType, _ := cmd.Flags().GetString("_sse-event-type")
@@ -124,6 +133,26 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 
 	if enginePath == "" {
 		enginePath = engineName
+	}
+
+	// Resolve openclaw-specific defaults from config (flag > config).
+	engineAgent := engineAgentFlag
+	if engineAgent == "" {
+		engineAgent = cfg.OpenClaw.AgentID
+	}
+	engineLocal := engineLocalFlag
+	if !engineLocalFlagSet {
+		engineLocal = cfg.OpenClaw.Local
+	}
+	sessionPrefix := cfg.OpenClaw.SessionPrefix
+	if sessionPrefix == "" {
+		sessionPrefix = "awh-worker"
+	}
+
+	if strings.EqualFold(engineName, "openclaw") && engineAgent == "" {
+		err := fmt.Errorf("engine=openclaw requires --engine-agent <id> or openclaw.agent_id in config")
+		output.Error(err.Error())
+		return err
 	}
 
 	var skillContent string
@@ -136,23 +165,8 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		skillContent = content
 	}
 
-	systemAppendix := daemon.BuildSystemAppendix(cfg.Name, cfg.BaseURL)
-	userMessage := daemon.BuildUserMessage(daemon.TriggerContext{
-		UserPrompt:   prompt,
-		SkillContent: skillContent,
-		EventType:    sseEventType,
-		EventData:    sseEventData,
-	})
-
-	eng := daemon.NewEngine(engineName, enginePath, engineModel, nil, cfg.Env)
-	streamEng, ok := eng.(daemon.StreamingEngine)
-	if !ok {
-		output.Error(fmt.Sprintf("Engine %q does not support streaming mode", engineName))
-		return fmt.Errorf("engine %q does not support streaming", engineName)
-	}
-
 	if !isDaemonChild && daemonMode {
-		return startAgentDaemon(cmd, cfg, engineName, engineModel, prompt, skillPath)
+		return startAgentDaemon(cmd, cfg, engineName, engineModel, prompt, skillPath, engineAgent, engineSessionFlag, engineLocal, engineLocalFlagSet)
 	}
 
 	// Foreground or daemon-child execution
@@ -161,9 +175,35 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		workerID = daemon.GenerateWorkerID()
 	}
 
+	// Resolve effective session id (flag > derived from worker id).
+	engineSession := engineSessionFlag
+	if engineSession == "" {
+		engineSession = sessionPrefix + "-" + workerID
+	}
+
+	systemAppendix := daemon.BuildSystemAppendix(cfg.Name, cfg.BaseURL, engineName)
+	userMessage := daemon.BuildUserMessage(daemon.TriggerContext{
+		UserPrompt:   prompt,
+		SkillContent: skillContent,
+		EventType:    sseEventType,
+		EventData:    sseEventData,
+	})
+
 	ws, err := daemon.NewWorkerState(workerID)
 	if err != nil {
 		return fmt.Errorf("create worker state: %w", err)
+	}
+
+	eng := daemon.NewEngine(engineName, enginePath, engineModel, nil, cfg.Env, daemon.EngineOptions{
+		OpenClawAgentID:   engineAgent,
+		OpenClawSessionID: engineSession,
+		OpenClawLocal:     engineLocal,
+		WorkerDir:         ws.Dir(),
+	})
+	streamEng, ok := eng.(daemon.StreamingEngine)
+	if !ok {
+		output.Error(fmt.Sprintf("Engine %q does not support streaming mode", engineName))
+		return fmt.Errorf("engine %q does not support streaming", engineName)
 	}
 
 	info := &daemon.WorkerInfo{
@@ -175,6 +215,11 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 		SkillFile: skillPath,
 		WorkDir:   workDir,
 		StartedAt: time.Now(),
+	}
+	if strings.EqualFold(engineName, "openclaw") {
+		info.EngineAgent = engineAgent
+		info.EngineSession = engineSession
+		info.EngineLocal = engineLocal
 	}
 	if err := ws.WriteInfo(info); err != nil {
 		return fmt.Errorf("write worker info: %w", err)
@@ -225,7 +270,7 @@ func runAgentRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, engineModel, prompt, skillPath string) error {
+func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, engineModel, prompt, skillPath, engineAgent, engineSession string, engineLocal, engineLocalSet bool) error {
 	workerID := daemon.GenerateWorkerID()
 
 	ws, err := daemon.NewWorkerState(workerID)
@@ -254,6 +299,19 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 	}
 	if v, _ := cobraCmd.Flags().GetString("work-dir"); v != "" {
 		childArgs = append(childArgs, "--work-dir", v)
+	}
+	if engineAgent != "" {
+		childArgs = append(childArgs, "--engine-agent", engineAgent)
+	}
+	if engineSession != "" {
+		childArgs = append(childArgs, "--engine-session", engineSession)
+	}
+	if engineLocalSet {
+		if engineLocal {
+			childArgs = append(childArgs, "--engine-local")
+		} else {
+			childArgs = append(childArgs, "--engine-local=false")
+		}
 	}
 	if baseURLOverride != "" {
 		childArgs = append(childArgs, "--base-url", baseURLOverride)
@@ -292,6 +350,11 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 		WorkDir:   workDir,
 		StartedAt: time.Now(),
 	}
+	if strings.EqualFold(engineName, "openclaw") {
+		info.EngineAgent = engineAgent
+		info.EngineSession = engineSession
+		info.EngineLocal = engineLocal
+	}
 	_ = ws.WriteInfo(info)
 
 	time.Sleep(500 * time.Millisecond)
@@ -313,6 +376,13 @@ func startAgentDaemon(cobraCmd *cobra.Command, cfg *config.Config, engineName, e
 	}
 	if workDir != "" {
 		fmt.Printf("  WorkDir: %s\n", workDir)
+	}
+	if strings.EqualFold(engineName, "openclaw") {
+		mode := "gateway"
+		if engineLocal {
+			mode = "local"
+		}
+		fmt.Printf("  OpenClaw: agent=%s session=%s mode=%s\n", engineAgent, engineSession, mode)
 	}
 	fmt.Printf("  Logs:   %s\n", ws.LogPath())
 	fmt.Printf("  Stop:   awh agent stop --id %s\n", workerID)
@@ -337,16 +407,19 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	type workerStatus struct {
-		ID        string `json:"id"`
-		Running   bool   `json:"running"`
-		PID       int    `json:"pid"`
-		Engine    string `json:"engine"`
-		Model     string `json:"model,omitempty"`
-		Prompt    string `json:"prompt,omitempty"`
-		SkillFile string `json:"skill_file,omitempty"`
-		WorkDir   string `json:"work_dir,omitempty"`
-		StartedAt string `json:"started_at"`
-		LogPath   string `json:"log_path"`
+		ID            string `json:"id"`
+		Running       bool   `json:"running"`
+		PID           int    `json:"pid"`
+		Engine        string `json:"engine"`
+		Model         string `json:"model,omitempty"`
+		Prompt        string `json:"prompt,omitempty"`
+		SkillFile     string `json:"skill_file,omitempty"`
+		WorkDir       string `json:"work_dir,omitempty"`
+		StartedAt     string `json:"started_at"`
+		LogPath       string `json:"log_path"`
+		EngineAgent   string `json:"engine_agent,omitempty"`
+		EngineSession string `json:"engine_session,omitempty"`
+		EngineLocal   bool   `json:"engine_local,omitempty"`
 	}
 
 	var allStatuses []workerStatus
@@ -369,6 +442,9 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 			st.SkillFile = info.SkillFile
 			st.WorkDir = info.WorkDir
 			st.StartedAt = info.StartedAt.Format(time.RFC3339)
+			st.EngineAgent = info.EngineAgent
+			st.EngineSession = info.EngineSession
+			st.EngineLocal = info.EngineLocal
 		}
 		allStatuses = append(allStatuses, st)
 	}
@@ -427,6 +503,14 @@ func runAgentStatus(cmd *cobra.Command, args []string) error {
 		}
 		if st.WorkDir != "" {
 			fmt.Printf("    WorkDir: %s\n", st.WorkDir)
+		}
+		if strings.EqualFold(st.Engine, "openclaw") {
+			mode := "gateway"
+			if st.EngineLocal {
+				mode = "local"
+			}
+			fmt.Printf("    OpenClaw: agent=%s session=%s mode=%s\n",
+				st.EngineAgent, st.EngineSession, mode)
 		}
 		fmt.Printf("    Started: %s\n", st.StartedAt)
 		fmt.Printf("    Logs:    %s\n", st.LogPath)

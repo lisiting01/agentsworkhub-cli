@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -67,7 +68,7 @@ func initAgentScheduleCmd() {
 	agentScheduleCmd.AddCommand(agentScheduleStatusCmd)
 	agentScheduleCmd.AddCommand(agentScheduleStopCmd)
 
-	agentScheduleCmd.Flags().String("engine", "claude", "AI engine: claude, codex, generic")
+	agentScheduleCmd.Flags().String("engine", "claude", "AI engine: claude, codex, openclaw, generic")
 	agentScheduleCmd.Flags().String("engine-path", "", "Path to AI engine binary (defaults to engine name)")
 	agentScheduleCmd.Flags().String("engine-model", "", "AI model name")
 	agentScheduleCmd.Flags().StringP("prompt", "p", "", "[Advanced] One-off instruction used on every worker spawn that is NOT SSE-triggered. Usually unnecessary — put context in --work-dir/CLAUDE.md instead")
@@ -78,6 +79,10 @@ func initAgentScheduleCmd() {
 	agentScheduleCmd.Flags().Bool("daemon", false, "Run as a background daemon")
 	agentScheduleCmd.Flags().Bool("watch", true, "Connect to platform SSE stream for instant event-driven spawning (disable with --watch=false)")
 	agentScheduleCmd.Flags().Bool("restart-on-failure", false, "Automatically restart the scheduler if it exits unexpectedly (daemon mode only)")
+
+	agentScheduleCmd.Flags().String("engine-agent", "", "[engine=openclaw] OpenClaw `--agent <id>` to invoke. Required for openclaw unless openclaw.agent_id is set in config")
+	agentScheduleCmd.Flags().String("engine-session", "", "[engine=openclaw] OpenClaw `--session-id <id>` reused across all turns. Default: <session-prefix>-sched-<name>")
+	agentScheduleCmd.Flags().Bool("engine-local", false, "[engine=openclaw] Run `openclaw agent --local` (embedded one-shot) instead of dispatching through the gateway daemon")
 
 	agentScheduleCmd.Flags().Bool("_schedulize", false, "internal: running as scheduler daemon child")
 	agentScheduleCmd.Flags().String("_scheduler-name", "", "internal: scheduler name for daemon child")
@@ -107,10 +112,13 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	daemonMode, _ := cmd.Flags().GetBool("daemon")
 	watchMode, _ := cmd.Flags().GetBool("watch")
 	restartOnFailure, _ := cmd.Flags().GetBool("restart-on-failure")
+	engineAgentFlag, _ := cmd.Flags().GetString("engine-agent")
+	engineSessionFlag, _ := cmd.Flags().GetString("engine-session")
+	engineLocalFlagSet := cmd.Flags().Changed("engine-local")
+	engineLocalFlag, _ := cmd.Flags().GetBool("engine-local")
 	isChild, _ := cmd.Flags().GetBool("_schedulize")
 	childName, _ := cmd.Flags().GetString("_scheduler-name")
 
-	_ = cfg // auth confirmed; credentials embedded in system prompt by BuildAgentSystemPrompt
 	if enginePath == "" {
 		enginePath = engineName
 	}
@@ -118,6 +126,33 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 	// Daemon child: use the name passed via hidden flag.
 	if isChild {
 		name = childName
+	}
+
+	// Resolve openclaw-specific defaults from config (flag > config).
+	engineAgent := engineAgentFlag
+	if engineAgent == "" {
+		engineAgent = cfg.OpenClaw.AgentID
+	}
+	engineLocal := engineLocalFlag
+	if !engineLocalFlagSet {
+		engineLocal = cfg.OpenClaw.Local
+	}
+	sessionPrefix := cfg.OpenClaw.SessionPrefix
+	if sessionPrefix == "" {
+		sessionPrefix = "awh-worker"
+	}
+	// One stable session id per scheduler instance: every worker turn we
+	// spawn over this scheduler's lifetime joins the same OpenClaw session
+	// so context (memories, prior tool results) carries across events.
+	engineSession := engineSessionFlag
+	if engineSession == "" {
+		engineSession = sessionPrefix + "-sched-" + name
+	}
+
+	if strings.EqualFold(engineName, "openclaw") && engineAgent == "" {
+		err := fmt.Errorf("engine=openclaw requires --engine-agent <id> or openclaw.agent_id in config")
+		output.Error(err.Error())
+		return err
 	}
 
 	ss, err := daemon.NewSchedulerState(name)
@@ -147,6 +182,12 @@ func runAgentScheduleStart(cmd *cobra.Command, args []string) error {
 		RestartOnFailure: restartOnFailure,
 		PID:              os.Getpid(),
 		StartedAt:        time.Now(),
+	}
+	if strings.EqualFold(engineName, "openclaw") {
+		info.EngineAgent = engineAgent
+		info.EngineSession = engineSession
+		info.EngineLocal = engineLocal
+		info.EngineLocalSet = engineLocalFlagSet
 	}
 
 	if !isChild && daemonMode {
@@ -234,6 +275,19 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 	if info.RestartOnFailure {
 		childArgs = append(childArgs, "--restart-on-failure")
 	}
+	if info.EngineAgent != "" {
+		childArgs = append(childArgs, "--engine-agent", info.EngineAgent)
+	}
+	if info.EngineSession != "" {
+		childArgs = append(childArgs, "--engine-session", info.EngineSession)
+	}
+	if info.EngineLocalSet {
+		if info.EngineLocal {
+			childArgs = append(childArgs, "--engine-local")
+		} else {
+			childArgs = append(childArgs, "--engine-local=false")
+		}
+	}
 	if baseURLOverride != "" {
 		childArgs = append(childArgs, "--base-url", baseURLOverride)
 	}
@@ -277,6 +331,13 @@ func startSchedulerDaemon(cobraCmd *cobra.Command, info *daemon.SchedulerInfo) e
 	}
 	if info.SkillFile != "" {
 		fmt.Printf("  Skill:    %s\n", info.SkillFile)
+	}
+	if strings.EqualFold(info.Engine, "openclaw") {
+		mode := "gateway"
+		if info.EngineLocal {
+			mode = "local"
+		}
+		fmt.Printf("  OpenClaw: agent=%s session=%s mode=%s\n", info.EngineAgent, info.EngineSession, mode)
 	}
 	fmt.Printf("  Interval: every %ds after completion\n", info.IntervalSecs)
 	fmt.Printf("  Logs:     %s\n", ss.LogPath())
@@ -466,6 +527,11 @@ func runSchedulerLoop(ctx context.Context, ss *daemon.SchedulerState, info *daem
 // the worker's user message can describe the triggering event. When an SSE event
 // is supplied, --prompt / --skill are deliberately suppressed because they would
 // otherwise override the event-based trigger signal.
+//
+// For engine=openclaw, the scheduler-level --engine-agent / --engine-session /
+// --engine-local are propagated so every worker turn joins the same OpenClaw
+// session (= persistent context across events) and is dispatched via the same
+// transport (gateway vs --local).
 func buildSchedulerWorkerArgs(exePath, workerID string, info *daemon.SchedulerInfo, ev *daemon.WatcherEvent) []string {
 	args := []string{exePath, "agent", "run",
 		"--_daemonize",
@@ -490,6 +556,19 @@ func buildSchedulerWorkerArgs(exePath, workerID string, info *daemon.SchedulerIn
 	}
 	if info.WorkDir != "" {
 		args = append(args, "--work-dir", info.WorkDir)
+	}
+	if info.EngineAgent != "" {
+		args = append(args, "--engine-agent", info.EngineAgent)
+	}
+	if info.EngineSession != "" {
+		args = append(args, "--engine-session", info.EngineSession)
+	}
+	if info.EngineLocalSet {
+		if info.EngineLocal {
+			args = append(args, "--engine-local")
+		} else {
+			args = append(args, "--engine-local=false")
+		}
 	}
 	if ev != nil {
 		args = append(args, "--_sse-event-type", ev.Type)

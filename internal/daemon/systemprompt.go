@@ -22,18 +22,38 @@ type TriggerContext struct {
 }
 
 // BuildSystemAppendix returns a minimal text block to inject into the AI
-// engine's system prompt via `--append-system-prompt`. It only introduces
-// the existence of the `awh` CLI and the one non-discoverable quirk
-// (attachment auto-upload). Role, workflow and command lists are intentionally
-// omitted: the platform is just a channel, the CLI is just a method, and the
-// agent is the brain — it figures out what to do on its own by using
-// `awh --help` and reading platform state.
-func BuildSystemAppendix(agentName, baseURL string) string {
+// engine's system prompt (Claude Code's `--append-system-prompt`) or, for
+// engines that lack a dedicated system-prompt flag (Codex, OpenClaw,
+// generic), to be folded into the user message head.
+//
+// It only introduces the existence of the `awh` CLI and the one
+// non-discoverable quirk (attachment auto-upload). Role, workflow and
+// command lists are intentionally omitted: the platform is just a channel,
+// the CLI is just a method, and the agent is the brain — it figures out
+// what to do on its own by using `awh --help` and reading platform state.
+//
+// engineName tweaks the host-runtime guidance: Claude Code gets a warning
+// against its sub-agent Tool; OpenClaw gets a hint about reporting back via
+// `openclaw message send` / `openclaw agent --session-id ... --deliver`.
+// Other engines get only the engine-neutral content. Empty engineName is
+// treated as "claude" for backward compat.
+func BuildSystemAppendix(agentName, baseURL, engineName string) string {
+	engine := strings.ToLower(strings.TrimSpace(engineName))
+	if engine == "" {
+		engine = "claude"
+	}
+
 	var b strings.Builder
 	b.WriteString("You are running as a background worker session spawned by the awh CLI. ")
-	b.WriteString("Use `awh` commands directly in this session to do platform work — ")
-	b.WriteString("do not use Claude Code's built-in Agent tool to spawn sub-agents ")
-	b.WriteString("(it has no Bash access and cannot run `awh`).\n\n")
+	b.WriteString("Use `awh` commands directly in this session to do platform work")
+
+	switch engine {
+	case "claude", "claude-code":
+		b.WriteString(" — do not use Claude Code's built-in Agent tool to spawn sub-agents ")
+		b.WriteString("(it has no Bash access and cannot run `awh`).\n\n")
+	default:
+		b.WriteString(".\n\n")
+	}
 
 	b.WriteString("You have access to a CLI tool called `awh` that interfaces with ")
 	b.WriteString("AgentsWorkhub, a task marketplace at ")
@@ -49,6 +69,18 @@ func BuildSystemAppendix(agentName, baseURL string) string {
 	b.WriteString("The CLI uploads the local file to the platform automatically and ")
 	b.WriteString("attaches it to the submission. Never write local file paths into ")
 	b.WriteString("the content body — they are not accessible to the publisher.\n\n")
+
+	if engine == "openclaw" {
+		b.WriteString("You are running inside an OpenClaw agent turn. If your work was ")
+		b.WriteString("delegated by a main conversation and you need to report progress or ")
+		b.WriteString("completion back to the user, push the update through one of OpenClaw's ")
+		b.WriteString("own outbound channels — for example:\n")
+		b.WriteString("  `openclaw message send --channel <provider> --target <dest> --message \"...\"`  (raw chat message)\n")
+		b.WriteString("  `openclaw agent --session-id <main-session-id> --message \"...\" --deliver`  (let the user's main agent reply)\n")
+		b.WriteString("Subsequent awh worker turns in this same session id will see your ")
+		b.WriteString("prior context, so prefer concise notes over re-stating the full ")
+		b.WriteString("task on every turn.\n\n")
+	}
 
 	b.WriteString("You are: ")
 	b.WriteString(agentName)
